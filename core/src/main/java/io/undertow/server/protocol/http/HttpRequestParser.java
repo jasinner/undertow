@@ -840,6 +840,7 @@ public abstract class HttpRequestParser {
         for (Class<?> c : classs) {
             for (Field field : c.getDeclaredFields()) {
                 if (field.getType().equals(HttpString.class)) {
+                    field.setAccessible(true);
                     HttpString result = null;
                     try {
                         result = (HttpString) field.get(null);
