@@ -29,11 +29,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 import io.undertow.Undertow;
-import io.undertow.UndertowOptions;
 import io.undertow.client.UndertowClient;
 import io.undertow.protocols.ssl.UndertowXnioSsl;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
+import io.undertow.server.handlers.LocalNameResolvingHandler;
 import io.undertow.server.handlers.PathHandler;
 import io.undertow.server.handlers.ResponseCodeHandler;
 import io.undertow.server.session.InMemorySessionManager;
@@ -43,6 +43,7 @@ import io.undertow.server.session.SessionCookieConfig;
 import io.undertow.server.session.SessionManager;
 import io.undertow.testutils.DefaultServer;
 import io.undertow.testutils.HttpClientUtils;
+import io.undertow.testutils.ProxyIgnore;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.cookie.Cookie;
@@ -62,6 +63,7 @@ import org.xnio.ssl.XnioSsl;
  * @author Emanuel Muckenhuber
  */
 @RunWith(DefaultServer.class)
+@ProxyIgnore
 public abstract class AbstractModClusterTestBase {
 
     protected static final MCMPTestClient.App NAME = new MCMPTestClient.App("/name", "localhost");
@@ -97,8 +99,6 @@ public abstract class AbstractModClusterTestBase {
     static String getType() {
         if (DefaultServer.isAjp()) {
             return "ajp";
-        } else if (DefaultServer.isSpdy()) {
-            return "spdy";
         } else if (DefaultServer.isHttps()) {
             return "https";
         } else {
@@ -118,7 +118,7 @@ public abstract class AbstractModClusterTestBase {
                 .setManagementPort(serverPort)
                 .create(modCluster, ResponseCodeHandler.HANDLE_404);
 
-        DefaultServer.setRootHandler(path(proxy).addPrefixPath("manager", mcmp));
+        DefaultServer.setRootHandler(new LocalNameResolvingHandler(path(proxy).addPrefixPath("manager", mcmp)));
         modCluster.start();
 
         httpClient = new DefaultHttpClient();
@@ -289,8 +289,6 @@ public abstract class AbstractModClusterTestBase {
             case "http":
                 builder.addHttpListener(config.getPort(), config.getHostname());
                 break;
-            case "spdy":
-                builder.setServerOption(UndertowOptions.ENABLE_SPDY, true);
             case "https":
                 builder.addHttpsListener(config.getPort(), config.getHostname(), DefaultServer.getServerSslContext());
                 break;

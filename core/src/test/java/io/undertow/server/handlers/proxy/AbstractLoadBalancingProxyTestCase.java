@@ -32,6 +32,7 @@ import io.undertow.testutils.TestHttpClient;
 import io.undertow.util.StatusCodes;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.DecompressingHttpClient;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Test;
@@ -66,7 +67,7 @@ public abstract class AbstractLoadBalancingProxyTestCase {
         final StringBuilder resultString = new StringBuilder();
 
         for (int i = 0; i < 6; ++i) {
-            TestHttpClient client = new TestHttpClient();
+            DecompressingHttpClient client = new DecompressingHttpClient(new TestHttpClient());
             try {
                 HttpGet get = new HttpGet(DefaultServer.getDefaultServerURL() + "/name");
                 HttpResponse result = client.execute(get);
@@ -81,36 +82,47 @@ public abstract class AbstractLoadBalancingProxyTestCase {
         Assert.assertTrue(resultString.toString().contains("server2"));
     }
 
+    @Test
+    public void testUrlEncoding() throws IOException {
+        TestHttpClient client = new TestHttpClient();
+        try {
+            HttpGet get = new HttpGet(DefaultServer.getDefaultServerURL() + "/url/foo=bar");
+            HttpResponse result = client.execute(get);
+            Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
+            Assert.assertEquals("/url/foo=bar", HttpClientUtils.readResponse(result));
+        } finally {
+            client.getConnectionManager().shutdown();
+        }
+    }
+
 
     @Test
-    public void testLoadSharedWithServerShutdown() throws IOException {
+    public void testLoadSharedWithServerShutdown() throws Exception {
         final StringBuilder resultString = new StringBuilder();
 
         for (int i = 0; i < 6; ++i) {
             TestHttpClient client = new TestHttpClient();
-            try {
-                HttpGet get = new HttpGet(DefaultServer.getDefaultServerURL() + "/name");
-                HttpResponse result = client.execute(get);
-                Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
-                resultString.append(HttpClientUtils.readResponse(result));
-                resultString.append(' ');
-            } catch (Throwable t) {
-                throw new RuntimeException("Failed with i=" + i, t);
-            } finally {
-                client.getConnectionManager().shutdown();
-            }
+            HttpGet get = new HttpGet(DefaultServer.getDefaultServerURL() + "/name");
+            HttpResponse result = client.execute(get);
+            Assert.assertEquals("Test failed with i=" + i, StatusCodes.OK, result.getStatusLine().getStatusCode());
+            resultString.append(HttpClientUtils.readResponse(result));
+            resultString.append(' ');
             server1.stop();
+            Thread.sleep(600);
+            get = new HttpGet(DefaultServer.getDefaultServerURL() + "/name");
+            result = client.execute(get);
+            Assert.assertEquals("Test failed with i=" + i, StatusCodes.OK, result.getStatusLine().getStatusCode());
+            resultString.append(HttpClientUtils.readResponse(result));
+            resultString.append(' ');
             server1.start();
             server2.stop();
+            Thread.sleep(600);
+            get = new HttpGet(DefaultServer.getDefaultServerURL() + "/name");
+            result = client.execute(get);
+            Assert.assertEquals("Test failed with i=" + i, StatusCodes.OK, result.getStatusLine().getStatusCode());
+            resultString.append(HttpClientUtils.readResponse(result));
+            resultString.append(' ');
             server2.start();
-            try {
-                //so this is not great, but we need to make sure the connection has actually closed
-                //otherwise the TCP close may not have been processed yet, resulting in the proxy
-                //picking a connection that is about to be closed
-                Thread.sleep(300);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
         }
         Assert.assertTrue(resultString.toString().contains("server1"));
         Assert.assertTrue(resultString.toString().contains("server2"));
@@ -126,11 +138,13 @@ public abstract class AbstractLoadBalancingProxyTestCase {
                     HttpGet get = new HttpGet(DefaultServer.getDefaultServerURL() + "/session");
                     get.addHeader("Connection", "close");
                     HttpResponse result = client.execute(get);
-                    Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
+                    Assert.assertEquals("Test failed with i=" + i, StatusCodes.OK, result.getStatusLine().getStatusCode());
                     int count = Integer.parseInt(HttpClientUtils.readResponse(result));
                     Assert.assertEquals(expected++, count);
+                } catch (AssertionError e) {
+                    throw e;
                 } catch (Exception e) {
-                    throw new RuntimeException("Test failed with i=" + i, e);
+                    throw new AssertionError("Test failed with i=" + i, e);
                 }
             }
         } finally {
@@ -157,11 +171,13 @@ public abstract class AbstractLoadBalancingProxyTestCase {
                     get.addHeader("a", "b");
                     get.addHeader("Connection", "close");
                     HttpResponse result = client.execute(get);
-                    Assert.assertEquals(StatusCodes.OK, result.getStatusLine().getStatusCode());
+                    Assert.assertEquals("Test failed with i=" + i, StatusCodes.OK, result.getStatusLine().getStatusCode());
                     int count = Integer.parseInt(HttpClientUtils.readResponse(result));
-                    Assert.assertEquals(expected++, count);
+                    Assert.assertEquals("Test failed with i=" + i, expected++, count);
+                } catch (AssertionError e) {
+                    throw e;
                 } catch (Exception e) {
-                    throw new RuntimeException("Test failed with i=" + i, e);
+                    throw new AssertionError("Test failed with i=" + i, e);
                 }
             }
         } finally {
@@ -174,6 +190,12 @@ public abstract class AbstractLoadBalancingProxyTestCase {
         return jvmRoute("JSESSIONID", s1, path()
                 .addPrefixPath("/session", new SessionAttachmentHandler(new SessionTestHandler(sessionConfig), new InMemorySessionManager(""), sessionConfig))
                 .addPrefixPath("/name", new StringSendHandler(server1))
+                .addPrefixPath("/url", new HttpHandler() {
+                    @Override
+                    public void handleRequest(HttpServerExchange exchange) throws Exception {
+                        exchange.getResponseSender().send(exchange.getRequestURI());
+                    }
+                })
                 .addPrefixPath("/path", new HttpHandler() {
                     @Override
                     public void handleRequest(HttpServerExchange exchange) throws Exception {

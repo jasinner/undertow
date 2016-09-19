@@ -22,6 +22,7 @@ import io.undertow.UndertowMessages;
 import io.undertow.connector.ByteBufferPool;
 import io.undertow.connector.PooledByteBuffer;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -40,7 +41,7 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 public class DefaultByteBufferPool implements ByteBufferPool {
 
     private final ThreadLocal<ThreadLocalData> threadLocalCache = new ThreadLocal<>();
-    private final List<ThreadLocalData> threadLocalDataList = Collections.synchronizedList(new ArrayList<ThreadLocalData>());
+    private final List<WeakReference<ThreadLocalData>> threadLocalDataList = Collections.synchronizedList(new ArrayList<WeakReference<ThreadLocalData>>());
     private final ConcurrentLinkedQueue<ByteBuffer> queue = new ConcurrentLinkedQueue<>();
 
     private final boolean direct;
@@ -50,11 +51,17 @@ public class DefaultByteBufferPool implements ByteBufferPool {
     private final int leakDectionPercent;
     private int count; //racily updated count used in leak detection
 
-    @SuppressWarnings("unused")
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private volatile int currentQueueLength = 0;
     private static final AtomicIntegerFieldUpdater<DefaultByteBufferPool> currentQueueLengthUpdater = AtomicIntegerFieldUpdater.newUpdater(DefaultByteBufferPool.class, "currentQueueLength");
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
+    private volatile int reclaimedThreadLocals = 0;
+    private static final AtomicIntegerFieldUpdater<DefaultByteBufferPool> reclaimedThreadLocalsUpdater = AtomicIntegerFieldUpdater.newUpdater(DefaultByteBufferPool.class, "reclaimedThreadLocals");
+
     private volatile boolean closed;
+
+    private final DefaultByteBufferPool arrayBackedPool;
 
 
     /**
@@ -76,6 +83,11 @@ public class DefaultByteBufferPool implements ByteBufferPool {
         this.maximumPoolSize = maximumPoolSize;
         this.threadLocalCacheSize = threadLocalCacheSize;
         this.leakDectionPercent = leakDecetionPercent;
+        if(direct) {
+            arrayBackedPool = new DefaultByteBufferPool(false, bufferSize, maximumPoolSize, 0, leakDecetionPercent);
+        } else {
+            arrayBackedPool = this;
+        }
     }
 
 
@@ -95,6 +107,11 @@ public class DefaultByteBufferPool implements ByteBufferPool {
     }
 
     @Override
+    public boolean isDirect() {
+        return direct;
+    }
+
+    @Override
     public PooledByteBuffer allocate() {
         if (closed) {
             throw UndertowMessages.MESSAGES.poolIsClosed();
@@ -110,8 +127,15 @@ public class DefaultByteBufferPool implements ByteBufferPool {
                 }
             } else {
                 local = new ThreadLocalData();
-                threadLocalCache.set(local);
-                threadLocalDataList.add(local);
+                synchronized (threadLocalDataList) {
+                    if (closed) {
+                        throw UndertowMessages.MESSAGES.poolIsClosed();
+                    }
+                    cleanupThreadLocalData();
+                    threadLocalDataList.add(new WeakReference<>(local));
+                    threadLocalCache.set(local);
+                }
+
             }
         }
         if (buffer == null) {
@@ -131,6 +155,32 @@ public class DefaultByteBufferPool implements ByteBufferPool {
         return new DefaultPooledBuffer(this, buffer, leakDectionPercent == 0 ? false : (++count % 100 > leakDectionPercent));
     }
 
+    @Override
+    public ByteBufferPool getArrayBackedPool() {
+        return arrayBackedPool;
+    }
+
+    private void cleanupThreadLocalData() {
+        // Called under lock, and only when at least quarter of the capacity has been collected.
+
+        int size = threadLocalDataList.size();
+
+        if (reclaimedThreadLocals > (size / 4)) {
+            int j = 0;
+            for (int i = 0; i < size; i++) {
+                WeakReference<ThreadLocalData> ref = threadLocalDataList.get(i);
+                if (ref.get() != null) {
+                    threadLocalDataList.set(j++, ref);
+                }
+            }
+            for (int i = size - 1; i >= j; i--) {
+                // A tail remove is inlined to a range change check and a decrement
+                threadLocalDataList.remove(i);
+            }
+            reclaimedThreadLocalsUpdater.addAndGet(this, -1 * (size - j));
+        }
+    }
+
     private void freeInternal(ByteBuffer buffer) {
         if (closed) {
             return; //GC will take care of it
@@ -145,6 +195,10 @@ public class DefaultByteBufferPool implements ByteBufferPool {
                 }
             }
         }
+        queueIfUnderMax(buffer);
+    }
+
+    private void queueIfUnderMax(ByteBuffer buffer) {
         int size;
         do {
             size = currentQueueLength;
@@ -162,8 +216,16 @@ public class DefaultByteBufferPool implements ByteBufferPool {
         }
         closed = true;
         queue.clear();
-        for(ThreadLocalData local : threadLocalDataList) {
-            local.buffers.clear();
+
+        synchronized (threadLocalDataList) {
+            for (WeakReference<ThreadLocalData> ref : threadLocalDataList) {
+                ThreadLocalData local = ref.get();
+                if (local != null) {
+                    local.buffers.clear();
+                }
+                ref.clear();
+            }
+            threadLocalDataList.clear();
         }
     }
 
@@ -182,9 +244,7 @@ public class DefaultByteBufferPool implements ByteBufferPool {
         private volatile int referenceCount = 1;
         private static final AtomicIntegerFieldUpdater<DefaultPooledBuffer> referenceCountUpdater = AtomicIntegerFieldUpdater.newUpdater(DefaultPooledBuffer.class, "referenceCount");
 
-
-
-        public DefaultPooledBuffer(DefaultByteBufferPool pool, ByteBuffer buffer, boolean detectLeaks) {
+        DefaultPooledBuffer(DefaultByteBufferPool pool, ByteBuffer buffer, boolean detectLeaks) {
             this.pool = pool;
             this.buffer = buffer;
             this.leakDetector = detectLeaks ? new LeakDetector() : null;
@@ -226,6 +286,19 @@ public class DefaultByteBufferPool implements ByteBufferPool {
     private class ThreadLocalData {
         ArrayDeque<ByteBuffer> buffers = new ArrayDeque<>(threadLocalCacheSize);
         int allocationDepth = 0;
+
+        @Override
+        protected void finalize() throws Throwable {
+            super.finalize();
+            reclaimedThreadLocalsUpdater.incrementAndGet(DefaultByteBufferPool.this);
+            if (buffers != null) {
+                // Recycle them
+                ByteBuffer buffer;
+                while ((buffer = buffers.poll()) != null) {
+                    queueIfUnderMax(buffer);
+                }
+            }
+        }
     }
 
     private static class LeakDetector {

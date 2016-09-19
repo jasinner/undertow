@@ -34,6 +34,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Array;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -69,7 +70,7 @@ public class PredicatedHandlersParser {
 
     public static List<PredicatedHandler> parse(final Path file, final ClassLoader classLoader) {
         try {
-            return parse(new String(Files.readAllBytes(file)), classLoader);
+            return parse(new String(Files.readAllBytes(file), StandardCharsets.UTF_8), classLoader);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -610,7 +611,7 @@ public class PredicatedHandlersParser {
                     ret.add(new Token(current.toString(), pos));
                     current.setLength(0);
                     currentStringDelim = 0;
-                } else if (c == '\n') {
+                } else if (c == '\n' || c == '\r') {
                     ret.add(new Token(current.toString(), pos));
                     current.setLength(0);
                     currentStringDelim = 0;
@@ -628,6 +629,7 @@ public class PredicatedHandlersParser {
                         }
                         break;
                     }
+                    case '\r':
                     case '\n': {
                         if (current.length() != 0) {
                             ret.add(new Token(current.toString(), pos));
@@ -703,7 +705,7 @@ public class PredicatedHandlersParser {
         return ret;
     }
 
-    public static IllegalStateException error(final String string, int pos, String reason) {
+    private static IllegalStateException error(final String string, int pos, String reason) {
         StringBuilder b = new StringBuilder();
         int linePos = 0;
         for (int i = 0; i < string.length(); ++i) {
@@ -816,7 +818,7 @@ public class PredicatedHandlersParser {
         private final Node left;
         private final Node right;
 
-        public AndNode(Token token, Node left, Node right) {
+        AndNode(Token token, Node left, Node right) {
             this.token = token;
             this.left = left;
             this.right = right;
@@ -840,7 +842,7 @@ public class PredicatedHandlersParser {
         private final Node left;
         private final Node right;
 
-        public OrNode(Token token, Node left, Node right) {
+        OrNode(Token token, Node left, Node right) {
             this.token = token;
             this.left = left;
             this.right = right;
@@ -866,7 +868,7 @@ public class PredicatedHandlersParser {
         private final Node right;
         private final Node elseBranch;
 
-        public PredicateOperatorNode(Token token, Node left, Node right, Node elseBranch) {
+        PredicateOperatorNode(Token token, Node left, Node right, Node elseBranch) {
             this.token = token;
             this.left = left;
             this.right = right;
@@ -896,7 +898,7 @@ public class PredicatedHandlersParser {
         private final Token token;
         private final Node node;
 
-        public NotNode(Token token, Node node) {
+        NotNode(Token token, Node node) {
             this.token = token;
             this.node = node;
         }
@@ -914,7 +916,7 @@ public class PredicatedHandlersParser {
         private final Token token;
         private final List<Node> block;
 
-        public BlockNode(Token token, List<Node> block) {
+        BlockNode(Token token, List<Node> block) {
             this.token = token;
             this.block = block;
         }
@@ -934,7 +936,7 @@ public class PredicatedHandlersParser {
         private final String token;
         private final int position;
 
-        public Token(final String token, final int position) {
+        Token(final String token, final int position) {
             this.token = token;
             this.position = position;
         }

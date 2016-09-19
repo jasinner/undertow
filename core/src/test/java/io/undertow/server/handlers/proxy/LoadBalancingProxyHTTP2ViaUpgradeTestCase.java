@@ -66,7 +66,7 @@ public class LoadBalancingProxyHTTP2ViaUpgradeTestCase extends AbstractLoadBalan
                             throw new RuntimeException("Not HTTP2");
                         }
                         exchange.getResponseHeaders().add(new HttpString("X-Custom-Header"), "foo");
-                        System.out.println(exchange.getRequestHeaders());
+                        System.out.println("server1 " + exchange.getRequestHeaders());
                         handler1.handleRequest(exchange);
                     }
                 }))
@@ -84,7 +84,7 @@ public class LoadBalancingProxyHTTP2ViaUpgradeTestCase extends AbstractLoadBalan
                             throw new RuntimeException("Not HTTP2");
                         }
                         exchange.getResponseHeaders().add(new HttpString("X-Custom-Header"), "foo");
-                        System.out.println(exchange.getRequestHeaders());
+                        System.out.println("server2 " + exchange.getRequestHeaders());
                         handler2.handleRequest(exchange);
                     }
                 }))
@@ -93,10 +93,10 @@ public class LoadBalancingProxyHTTP2ViaUpgradeTestCase extends AbstractLoadBalan
         server2.start();
 
         DefaultServer.setRootHandler(new ProxyHandler(new LoadBalancingProxyClient()
-                .setConnectionsPerThread(1)
+                .setConnectionsPerThread(4)
                 .addHost(new URI("h2c", null, DefaultServer.getHostAddress("default"), port + 1, null, null, null), "s1")
                 .addHost(new URI("h2c", null, DefaultServer.getHostAddress("default"), port + 2, null, null, null), "s2")
-                , 10000, ResponseCodeHandler.HANDLE_404));
+                , 10000, ResponseCodeHandler.HANDLE_404, false, false , 2));
     }
 
     @Test

@@ -17,7 +17,9 @@
  */
 package io.undertow.websockets.core.protocol.version07;
 
+import io.undertow.UndertowLogger;
 import io.undertow.server.protocol.framed.SendFrameHeader;
+import io.undertow.util.ImmediatePooledByteBuffer;
 import io.undertow.websockets.core.StreamSinkFrameChannel;
 import io.undertow.websockets.core.WebSocketFrameType;
 import io.undertow.websockets.core.WebSocketMessages;
@@ -39,6 +41,7 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
     private final Masker masker;
     private volatile boolean dataWritten = false;
     protected final ExtensionFunction extensionFunction;
+    private final Random random = new Random();
 
     protected WebSocket07FrameSinkChannel(WebSocket07Channel wsChannel, WebSocketFrameType type) {
         super(wsChannel, type);
@@ -56,7 +59,7 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
             extensionFunction = wsChannel.getExtensionFunction();
             setRsv(extensionFunction.writeRsv(0));
         } else {
-            extensionFunction = NoopExtensionFunction.instance;
+            extensionFunction = NoopExtensionFunction.INSTANCE;
             setRsv(0);
         }
     }
@@ -94,7 +97,6 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
 
     @Override
     protected SendFrameHeader createFrameHeader() {
-        PooledByteBuffer start = getChannel().getBufferPool().allocate();
         byte b0 = 0;
 
         //if writes are shutdown this is the final fragment
@@ -111,7 +113,7 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
         b0 |= (rsv & 7) << 4;
         b0 |= opCode & 0xf;
 
-        final ByteBuffer header = start.getBuffer();
+        final ByteBuffer header = ByteBuffer.allocate(14);
 
         byte maskKey = 0;
         if(masker != null) {
@@ -139,7 +141,7 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
         }
 
         if(masker != null) {
-            int maskingKey = new Random().nextInt(); //generate a new key for this frame
+            int maskingKey = random.nextInt(); //generate a new key for this frame
             header.put((byte)((maskingKey >> 24) & 0xFF));
             header.put((byte)((maskingKey >> 16) & 0xFF));
             header.put((byte)((maskingKey >> 8) & 0xFF));
@@ -152,17 +154,17 @@ public abstract class WebSocket07FrameSinkChannel extends StreamSinkFrameChannel
 
         header.flip();
 
-        return new SendFrameHeader(0, start);
+        return new SendFrameHeader(0, new ImmediatePooledByteBuffer(header));
     }
 
     @Override
-    public boolean sendInternal(PooledByteBuffer pooled) throws IOException {
-        // Check that the underlying write will succeed prior to applying the function
-        // Could corrupt LZW stream if not
-        if(safeToSend()) {
-            return super.sendInternal(extensionFunction.transformForWrite(pooled, getWebSocketChannel()));
+    protected PooledByteBuffer preWriteTransform(PooledByteBuffer body) {
+        try {
+            return super.preWriteTransform(extensionFunction.transformForWrite(body, this, this.isFinalFrameQueued()));
+        } catch (IOException e) {
+            UndertowLogger.REQUEST_IO_LOGGER.ioException(e);
+            markBroken();
+            throw new RuntimeException(e);
         }
-
-        return false;
     }
 }

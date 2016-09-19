@@ -167,6 +167,7 @@ public class CachedResource implements Resource, RangeAwareResource {
             }
             underlyingResource.serve(newSender, exchange, completionCallback);
         } else {
+            UndertowLogger.REQUEST_LOGGER.tracef("Serving resource %s from the buffer cache to %s", name, exchange);
             //serve straight from the cache
             ByteBuffer[] buffers;
             boolean ok = false;
@@ -308,7 +309,7 @@ public class CachedResource implements Resource, RangeAwareResource {
         private final DirectBufferCache.CacheEntry entry;
         private final IoCallback callback;
 
-        public DereferenceCallback(DirectBufferCache.CacheEntry entry, final IoCallback callback) {
+        DereferenceCallback(DirectBufferCache.CacheEntry entry, final IoCallback callback) {
             this.entry = entry;
             this.callback = callback;
         }

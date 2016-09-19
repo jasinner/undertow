@@ -18,6 +18,8 @@
 
 package io.undertow.servlet.handlers;
 
+import javax.servlet.http.MappingMatch;
+
 /**
  * @author Stuart Douglas
  */
@@ -82,7 +84,15 @@ public class ServletPathMatch {
         return type;
     }
 
-    public static enum Type {
+    public String getMatchString() {
+        return servletChain.getPattern();
+    }
+
+    public MappingMatch getMappingMatch() {
+        return servletChain.getMappingMatch();
+    }
+
+    public enum Type {
         /**
          * A normal servlet match, the invocation should proceed as normal
          */

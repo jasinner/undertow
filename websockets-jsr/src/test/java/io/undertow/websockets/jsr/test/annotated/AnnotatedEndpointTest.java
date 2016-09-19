@@ -17,12 +17,20 @@
  */
 package io.undertow.websockets.jsr.test.annotated;
 
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 import javax.websocket.ClientEndpoint;
 import javax.websocket.CloseReason;
+import javax.websocket.OnClose;
 import javax.websocket.Session;
 
+import java.io.IOException;
 import java.net.URI;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -39,6 +47,7 @@ import io.undertow.Handlers;
 import io.undertow.servlet.api.DeploymentInfo;
 import io.undertow.servlet.api.DeploymentManager;
 import io.undertow.servlet.api.ServletContainer;
+import io.undertow.servlet.api.ServletInfo;
 import io.undertow.servlet.test.util.TestClassIntrospector;
 import io.undertow.servlet.test.util.TestResourceLoader;
 import io.undertow.testutils.DefaultServer;
@@ -91,6 +100,8 @@ public class AnnotatedEndpointTest {
                                     }
                                 })
                 )
+                .addServlet(new ServletInfo("redirect", RedirectServlet.class)
+                .addMapping("/redirect"))
                 .setDeploymentName("servletContext.war");
 
 
@@ -118,6 +129,17 @@ public class AnnotatedEndpointTest {
         client.destroy();
     }
 
+    @Test
+    public void testRedirectHandling() throws Exception {
+        AnnotatedClientEndpoint.reset();
+        Session session = deployment.connectToServer(AnnotatedClientEndpoint.class, new URI("ws://" + DefaultServer.getHostAddress("default") + ":" + DefaultServer.getHostPort("default") + "/ws/redirect"));
+
+        Assert.assertEquals("hi Stuart (protocol=foo)", AnnotatedClientEndpoint.message());
+
+        session.close();
+        Assert.assertEquals("CLOSED", AnnotatedClientEndpoint.message());
+    }
+
 
     @Test
     public void testWebSocketInRootContext() throws Exception {
@@ -142,6 +164,19 @@ public class AnnotatedEndpointTest {
         session.close();
         Assert.assertEquals("CLOSED", AnnotatedClientEndpoint.message());
     }
+
+
+    @Test
+    public void testIdleTimeout() throws Exception {
+        AnnotatedClientEndpoint.reset();
+        Session session = deployment.connectToServer(AnnotatedClientEndpoint.class, new URI("ws://" + DefaultServer.getHostAddress("default") + ":" + DefaultServer.getHostPort("default") + "/ws/chat/Bob"));
+
+        Assert.assertEquals("hi Bob (protocol=foo)", AnnotatedClientEndpoint.message());
+
+        session.close();
+        Assert.assertEquals("CLOSED", AnnotatedClientEndpoint.message());
+    }
+
 
     @Test
     public void testCloseReason() throws Exception {
@@ -196,6 +231,18 @@ public class AnnotatedEndpointTest {
 
     }
 
+    @Test
+    public void testClientSideIdleTimeout() throws Exception {
+        //make a sub class
+        CountDownLatch latch = new CountDownLatch(1);
+        CloseCountdownEndpoint c = new CloseCountdownEndpoint(latch);
+
+        Session session = deployment.connectToServer(c, new URI("ws://" + DefaultServer.getHostAddress("default") + ":" + DefaultServer.getHostPort("default") + "/ws/chat/Bob"));
+        session.setMaxIdleTimeout(100);
+        Assert.assertTrue(latch.await(2000, TimeUnit.MILLISECONDS));
+        Assert.assertFalse(session.isOpen());
+
+    }
 
     @Test
     public void testGenericMessageHandling() throws Exception {
@@ -295,4 +342,28 @@ public class AnnotatedEndpointTest {
 
     @ClientEndpoint
     public static class DoNothingEndpoint {}
+
+
+    @ClientEndpoint
+    public static class CloseCountdownEndpoint {
+
+        private final CountDownLatch latch;
+
+        public CloseCountdownEndpoint(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @OnClose
+        public void close() {
+            latch.countDown();
+        }
+
+    }
+
+    public static final class RedirectServlet extends HttpServlet{
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+            resp.sendRedirect("/ws/chat/Stuart");
+        }
+    }
 }

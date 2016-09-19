@@ -24,17 +24,21 @@ import org.xnio.ChannelListener;
 import org.xnio.ChannelListeners;
 import org.xnio.IoUtils;
 import org.xnio.StreamConnection;
+import org.xnio.XnioExecutor;
 import org.xnio.conduits.ConduitStreamSinkChannel;
 import org.xnio.conduits.ConduitStreamSourceChannel;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author Stuart Douglas
  */
 public class ConnectionUtils {
+
+    private static final long MAX_DRAIN_TIME = Long.getLong("io.undertow.max-drain-time", 10000);
 
     private ConnectionUtils() {
 
@@ -81,25 +85,33 @@ public class ConnectionUtils {
         }
     }
 
-    private static void doDrain(final StreamConnection connection, Closeable... additional) {
+    private static void doDrain(final StreamConnection connection, final Closeable... additional) {
         if (!connection.getSourceChannel().isOpen()) {
             IoUtils.safeClose(connection);
+            IoUtils.safeClose(additional);
             return;
         }
         final ByteBuffer b = ByteBuffer.allocate(1);
         try {
             int res = connection.getSourceChannel().read(b);
+            b.clear();
             if (res == 0) {
+                final XnioExecutor.Key key = connection.getIoThread().executeAfter(new Runnable() {
+                    @Override
+                    public void run() {
+                        IoUtils.safeClose(connection);
+                        IoUtils.safeClose(additional);
+                    }
+                }, MAX_DRAIN_TIME, TimeUnit.MILLISECONDS);
                 connection.getSourceChannel().setReadListener(new ChannelListener<ConduitStreamSourceChannel>() {
                     @Override
                     public void handleEvent(ConduitStreamSourceChannel channel) {
                         try {
                             int res = channel.read(b);
-                            if (res == 0) {
-                                return;
-                            } else {
+                            if (res != 0) {
                                 IoUtils.safeClose(connection);
                                 IoUtils.safeClose(additional);
+                                key.remove();
                             }
                         } catch (Exception e) {
                             if (e instanceof IOException) {
@@ -109,6 +121,7 @@ public class ConnectionUtils {
                             }
                             IoUtils.safeClose(connection);
                             IoUtils.safeClose(additional);
+                            key.remove();
                         }
                     }
                 });

@@ -20,6 +20,7 @@ package io.undertow.servlet.spec;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
@@ -144,6 +145,8 @@ public final class HttpServletResponseImpl implements HttpServletResponse {
     }
 
     public void doErrorDispatch(int sc, String error) throws IOException {
+        writer = null;
+        responseState = ResponseState.NONE;
         resetBuffer();
         treatAsCommitted = false;
         final String location = servletContext.getDeployment().getErrorPages().getErrorLocation(sc);
@@ -215,7 +218,7 @@ public final class HttpServletResponseImpl implements HttpServletResponse {
         if(name == null) {
             throw UndertowServletMessages.MESSAGES.headerNameWasNull();
         }
-        setHeader(new HttpString(name), value);
+        setHeader(HttpString.tryFromString(name), value);
     }
 
 
@@ -238,7 +241,7 @@ public final class HttpServletResponseImpl implements HttpServletResponse {
         if(name == null) {
             throw UndertowServletMessages.MESSAGES.headerNameWasNull();
         }
-        addHeader(new HttpString(name), value);
+        addHeader(HttpString.tryFromString(name), value);
     }
 
     public void addHeader(final HttpString name, final String value) {
@@ -492,7 +495,13 @@ public final class HttpServletResponseImpl implements HttpServletResponse {
             servletOutputStream.resetBuffer();
         }
         if (writer != null) {
-            writer = new PrintWriter(servletOutputStream, false);
+            final ServletPrintWriter servletPrintWriter;
+            try {
+                servletPrintWriter = new ServletPrintWriter(servletOutputStream, getCharacterEncoding());
+            writer = ServletPrintWriterDelegate.newInstance(servletPrintWriter);
+            } catch (UnsupportedEncodingException e) {
+                throw new RuntimeException(e); //should never happen
+            }
         }
     }
 
@@ -747,7 +756,7 @@ public final class HttpServletResponseImpl implements HttpServletResponse {
         return contentLength;
     }
 
-    public static enum ResponseState {
+    public enum ResponseState {
         NONE,
         STREAM,
         WRITER

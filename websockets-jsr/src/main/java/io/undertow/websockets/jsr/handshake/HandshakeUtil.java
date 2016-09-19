@@ -17,6 +17,7 @@
  */
 package io.undertow.websockets.jsr.handshake;
 
+import java.security.Principal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -41,6 +42,7 @@ public final class HandshakeUtil {
 
 
     public static final AttachmentKey<Map<String, String>> PATH_PARAMS = AttachmentKey.create(Map.class);
+    public static final AttachmentKey<Principal> PRINCIPAL = AttachmentKey.create(Principal.class);
 
     private HandshakeUtil() {
     }
@@ -96,7 +98,7 @@ public final class HandshakeUtil {
 
     static List<Extension> selectExtensions(final ConfiguredServerEndpoint config, final List<Extension> requestedExtensions) {
         if (config.getEndpointConfiguration().getConfigurator() != null) {
-            return config.getEndpointConfiguration().getConfigurator().getNegotiatedExtensions(config.getEndpointConfiguration().getExtensions(), requestedExtensions);
+            return config.getEndpointConfiguration().getConfigurator().getNegotiatedExtensions(config.getExtensions(), requestedExtensions);
         } else {
             return Collections.emptyList();
         }

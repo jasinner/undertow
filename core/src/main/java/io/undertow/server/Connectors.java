@@ -26,6 +26,7 @@ import io.undertow.util.StatusCodes;
 import io.undertow.util.URLUtils;
 import io.undertow.connector.PooledByteBuffer;
 import org.xnio.channels.StreamSourceChannel;
+import org.xnio.conduits.ConduitStreamSinkChannel;
 
 import java.util.Date;
 import java.util.Map;
@@ -193,6 +194,10 @@ public class Connectors {
             header.append("; Expires=");
             header.append(DateUtils.toDateString(cookie.getExpires()));
         }
+        if (cookie.getComment() != null && !cookie.getComment().isEmpty()) {
+            header.append("; Comment=");
+            header.append(cookie.getComment());
+        }
         return header.toString();
     }
 
@@ -204,7 +209,10 @@ public class Connectors {
             boolean resumed = exchange.runResumeReadWrite();
             if (exchange.isDispatched()) {
                 if (resumed) {
-                    throw new RuntimeException("resumed and dispatched");
+                    UndertowLogger.REQUEST_LOGGER.resumedAndDispatched();
+                    exchange.setStatusCode(500);
+                    exchange.endExchange();
+                    return;
                 }
                 final Runnable dispatchTask = exchange.getDispatchTask();
                 Executor executor = exchange.getDispatchExecutor();
@@ -218,6 +226,7 @@ public class Connectors {
                 exchange.endExchange();
             }
         } catch (Throwable t) {
+            exchange.putAttachment(DefaultResponseListener.EXCEPTION, t);
             exchange.setInCall(false);
             if (!exchange.isResponseStarted()) {
                 exchange.setStatusCode(StatusCodes.INTERNAL_SERVER_ERROR);
@@ -317,5 +326,13 @@ public class Connectors {
             return false;
         }
         return true;
+    }
+
+    public static void updateResponseBytesSent(HttpServerExchange exchange, long bytes) {
+        exchange.updateBytesSent(bytes);
+    }
+
+    public static ConduitStreamSinkChannel getConduitSinkChannel(HttpServerExchange exchange) {
+        return exchange.getConnection().getSinkChannel();
     }
 }

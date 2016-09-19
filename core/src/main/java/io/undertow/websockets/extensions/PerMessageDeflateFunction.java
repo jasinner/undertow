@@ -18,12 +18,16 @@
 
 package io.undertow.websockets.extensions;
 
+import io.undertow.connector.ByteBufferPool;
 import io.undertow.connector.PooledByteBuffer;
 import io.undertow.util.ImmediatePooledByteBuffer;
+import io.undertow.websockets.core.StreamSinkFrameChannel;
+import io.undertow.websockets.core.StreamSourceFrameChannel;
 import io.undertow.websockets.core.WebSocketChannel;
 import io.undertow.websockets.core.WebSocketLogger;
 import io.undertow.websockets.core.WebSocketMessages;
 import org.xnio.Buffers;
+import org.xnio.IoUtils;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -45,13 +49,14 @@ import java.util.zip.Inflater;
  */
 public class PerMessageDeflateFunction implements ExtensionFunction {
 
-    public static final byte[] TAIL = new byte[]{0x00, 0x00, (byte) 0xFF, (byte) 0xFF};
+    private static final byte[] TAIL = new byte[]{0x00, 0x00, (byte) 0xFF, (byte) 0xFF};
 
     private final int deflaterLevel;
     private final boolean compressContextTakeover;
     private final boolean decompressContextTakeover;
     private final Inflater decompress;
     private final Deflater compress;
+    private StreamSourceFrameChannel currentReadChannel;
 
     /**
      * Create a new {@code PerMessageDeflateExtension} instance.
@@ -79,49 +84,58 @@ public class PerMessageDeflateFunction implements ExtensionFunction {
     }
 
     @Override
-    public synchronized PooledByteBuffer transformForWrite(PooledByteBuffer pooledBuffer, WebSocketChannel channel) throws IOException {
+    public synchronized PooledByteBuffer transformForWrite(PooledByteBuffer pooledBuffer, StreamSinkFrameChannel channel, boolean lastFrame) throws IOException {
         ByteBuffer buffer = pooledBuffer.getBuffer();
+        PooledByteBuffer inputBuffer = null;
         if (buffer.hasArray()) {
             compress.setInput(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
         } else {
-            compress.setInput(Buffers.take(buffer));
+            inputBuffer = toArrayBacked(buffer, channel.getWebSocketChannel().getBufferPool());
+            compress.setInput(inputBuffer.getBuffer().array(), inputBuffer.getBuffer().arrayOffset() + inputBuffer.getBuffer().position(), inputBuffer.getBuffer().remaining());
         }
 
-        PooledByteBuffer output = allocateBufferWithArray(channel, 0); // first pass
+        PooledByteBuffer output = allocateBufferWithArray(channel.getWebSocketChannel(), 0); // first pass
         ByteBuffer outputBuffer = output.getBuffer();
 
+        boolean onceOnly = true;
         try {
-            while (!compress.needsInput() && !compress.finished()) {
+            while ((!compress.needsInput() && !compress.finished()) || !outputBuffer.hasRemaining() || (onceOnly && lastFrame)) {
+                onceOnly = false;
+                //we need the hasRemaining check, because if the inflater fails to flush needsInput() will return false but it may have flushed an incomplete deflate block
                 if (!outputBuffer.hasRemaining()) {
-                    output = largerBuffer(output, channel, outputBuffer.capacity() * 2);
+                    output = largerBuffer(output, channel.getWebSocketChannel(), outputBuffer.capacity() * 2);
                     outputBuffer = output.getBuffer();
                 }
 
                 int n = compress.deflate(
                         outputBuffer.array(),
                         outputBuffer.arrayOffset() + outputBuffer.position(),
-                        outputBuffer.remaining(),
-                        Deflater.SYNC_FLUSH);
+                        outputBuffer.remaining(), lastFrame ?  Deflater.SYNC_FLUSH : Deflater.NO_FLUSH );
                 outputBuffer.position(outputBuffer.position() + n);
             }
         } finally {
             // Free the buffer AFTER compression so it doesn't get re-used out from under us
-            pooledBuffer.close();
+            IoUtils.safeClose(pooledBuffer, inputBuffer);
         }
 
-        if (!outputBuffer.hasRemaining()) {
-            output = largerBuffer(output, channel, outputBuffer.capacity() + 1);
-            outputBuffer = output.getBuffer();
+        if(lastFrame) {
+            outputBuffer.put((byte) 0);
+            if (!compressContextTakeover) {
+                compress.reset();
+            }
         }
-
-        outputBuffer.put((byte) 0);
         outputBuffer.flip();
-
-        if (!compressContextTakeover) {
-            compress.reset();
-        }
-
         return output;
+    }
+
+    private PooledByteBuffer toArrayBacked(ByteBuffer buffer, ByteBufferPool pool) {
+        if(pool.getBufferSize() < buffer.remaining()) {
+            return new ImmediatePooledByteBuffer(ByteBuffer.wrap(Buffers.take(buffer)));
+        }
+        PooledByteBuffer newBuf = pool.getArrayBackedPool().allocate();
+        newBuf.getBuffer().put(buffer);
+        newBuf.getBuffer().flip();
+        return newBuf;
     }
 
     private PooledByteBuffer largerBuffer(PooledByteBuffer smaller, WebSocketChannel channel, int newSize) {
@@ -138,50 +152,53 @@ public class PerMessageDeflateFunction implements ExtensionFunction {
 
     private PooledByteBuffer allocateBufferWithArray(WebSocketChannel channel, int size) {
         if (size > 0) {
-            // TODO use newer XNIO sized pool thingies smartly
-            return new ImmediatePooledByteBuffer(ByteBuffer.allocate(size));
+            if(size > channel.getBufferPool().getBufferSize()) {
+                // TODO use newer XNIO sized pool thingies smartly
+                return new ImmediatePooledByteBuffer(ByteBuffer.allocate(size));
+            }
         }
 
-        PooledByteBuffer pooled = channel.getBufferPool().allocate();
-        if (pooled.getBuffer().hasArray()) {
-            return pooled;
-        } else {
-            int pooledSize = pooled.getBuffer().remaining();
-            pooled.close();
-            return allocateBufferWithArray(channel, pooledSize);
-        }
+        return channel.getBufferPool().getArrayBackedPool().allocate();
     }
 
     @Override
-    public synchronized PooledByteBuffer transformForRead(PooledByteBuffer pooledBuffer, WebSocketChannel channel, boolean lastFragmentOfFrame) throws IOException {
+    public synchronized PooledByteBuffer transformForRead(PooledByteBuffer pooledBuffer, StreamSourceFrameChannel channel, boolean lastFragmentOfMessage) throws IOException {
+        if ((channel.getRsv() & 4) == 0) {
+            //rsv bit not set, this message is not compressed
+            return pooledBuffer;
+        }
+        PooledByteBuffer output = allocateBufferWithArray(channel.getWebSocketChannel(), 0); // first pass
+        PooledByteBuffer inputBuffer = null;
+        if (currentReadChannel != null && currentReadChannel != channel) {
+            //new channel, we did not get a last fragment message which can happens sometimes
+
+            decompress.setInput(TAIL);
+            output = decompress(channel.getWebSocketChannel(), output);
+        }
         ByteBuffer buffer = pooledBuffer.getBuffer();
 
         if (buffer.hasArray()) {
             decompress.setInput(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
         } else {
-            decompress.setInput(Buffers.take(buffer));
+            inputBuffer = toArrayBacked(buffer, channel.getWebSocketChannel().getBufferPool());
+            decompress.setInput(inputBuffer.getBuffer().array(), inputBuffer.getBuffer().arrayOffset() + inputBuffer.getBuffer().position(), inputBuffer.getBuffer().remaining());
         }
-
-        PooledByteBuffer output = allocateBufferWithArray(channel, 0); // first pass
-
         try {
-            output = decompress(channel, output);
+            output = decompress(channel.getWebSocketChannel(), output);
         } finally {
             // Free the buffer AFTER decompression so it doesn't get re-used out from under us
-            pooledBuffer.close();
+            IoUtils.safeClose(inputBuffer, pooledBuffer);
         }
 
-        if (lastFragmentOfFrame) {
+        if (lastFragmentOfMessage) {
             decompress.setInput(TAIL);
-            output = decompress(channel, output);
+            output = decompress(channel.getWebSocketChannel(), output);
+            currentReadChannel = null;
+        } else {
+            currentReadChannel = channel;
         }
 
         output.getBuffer().flip();
-
-        if (lastFragmentOfFrame && !decompressContextTakeover) {
-            decompress.reset();
-        }
-
         return output;
     }
 

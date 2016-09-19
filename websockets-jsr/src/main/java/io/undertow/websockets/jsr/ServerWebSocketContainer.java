@@ -22,7 +22,7 @@ import io.undertow.server.HttpUpgradeListener;
 import io.undertow.servlet.api.ClassIntrospecter;
 import io.undertow.servlet.api.InstanceFactory;
 import io.undertow.servlet.api.InstanceHandle;
-import io.undertow.servlet.api.ThreadSetupAction;
+import io.undertow.servlet.api.ThreadSetupHandler;
 import io.undertow.servlet.spec.ServletContextImpl;
 import io.undertow.servlet.util.ConstructorInstanceFactory;
 import io.undertow.servlet.util.ImmediateInstanceHandle;
@@ -110,7 +110,6 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
 
     private final XnioWorker xnioWorker;
     private final ByteBufferPool bufferPool;
-    private final ThreadSetupAction threadSetupAction;
     private final boolean dispatchToWorker;
     private final InetSocketAddress clientBindAddress;
     private final WebSocketReconnectHandler webSocketReconnectHandler;
@@ -125,24 +124,31 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
 
     private final List<WebsocketClientSslProvider> clientSslProviders;
     private final List<PauseListener> pauseListeners = new ArrayList<>();
+    private final List<Extension> installedExtensions;
+
+    private final ThreadSetupHandler.Action<Void, Runnable> invokeEndpointTask;
 
     private volatile boolean closed = false;
 
-    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final XnioWorker xnioWorker, ByteBufferPool bufferPool, ThreadSetupAction threadSetupAction, boolean dispatchToWorker, boolean clientMode) {
-        this(classIntrospecter, ServerWebSocketContainer.class.getClassLoader(), xnioWorker, bufferPool, threadSetupAction, dispatchToWorker, null, null);
+    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final XnioWorker xnioWorker, ByteBufferPool bufferPool, List<ThreadSetupHandler> threadSetupHandlers, boolean dispatchToWorker, boolean clientMode) {
+        this(classIntrospecter, ServerWebSocketContainer.class.getClassLoader(), xnioWorker, bufferPool, threadSetupHandlers, dispatchToWorker, null, null);
     }
 
-    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final ClassLoader classLoader, XnioWorker xnioWorker, ByteBufferPool bufferPool, ThreadSetupAction threadSetupAction, boolean dispatchToWorker) {
-        this(classIntrospecter, classLoader, xnioWorker, bufferPool, threadSetupAction, dispatchToWorker, null, null);
+    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final ClassLoader classLoader, XnioWorker xnioWorker, ByteBufferPool bufferPool, List<ThreadSetupHandler> threadSetupHandlers, boolean dispatchToWorker) {
+        this(classIntrospecter, classLoader, xnioWorker, bufferPool, threadSetupHandlers, dispatchToWorker, null, null);
     }
 
-    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final ClassLoader classLoader, XnioWorker xnioWorker, ByteBufferPool bufferPool, ThreadSetupAction threadSetupAction, boolean dispatchToWorker, InetSocketAddress clientBindAddress, WebSocketReconnectHandler reconnectHandler) {
+    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final ClassLoader classLoader, XnioWorker xnioWorker, ByteBufferPool bufferPool, List<ThreadSetupHandler> threadSetupHandlers, boolean dispatchToWorker, InetSocketAddress clientBindAddress, WebSocketReconnectHandler reconnectHandler) {
+        this(classIntrospecter, classLoader, xnioWorker, bufferPool, threadSetupHandlers, dispatchToWorker, clientBindAddress, reconnectHandler, Collections.emptyList());
+    }
+
+    public ServerWebSocketContainer(final ClassIntrospecter classIntrospecter, final ClassLoader classLoader, XnioWorker xnioWorker, ByteBufferPool bufferPool, List<ThreadSetupHandler> threadSetupHandlers, boolean dispatchToWorker, InetSocketAddress clientBindAddress, WebSocketReconnectHandler reconnectHandler, List<Extension> installedExtensions) {
         this.classIntrospecter = classIntrospecter;
         this.bufferPool = bufferPool;
         this.xnioWorker = xnioWorker;
-        this.threadSetupAction = threadSetupAction;
         this.dispatchToWorker = dispatchToWorker;
         this.clientBindAddress = clientBindAddress;
+        this.installedExtensions = new ArrayList<>(installedExtensions);
         List<WebsocketClientSslProvider> clientSslProviders = new ArrayList<>();
         for (WebsocketClientSslProvider provider : ServiceLoader.load(WebsocketClientSslProvider.class, classLoader)) {
             clientSslProviders.add(provider);
@@ -150,6 +156,17 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
 
         this.clientSslProviders = Collections.unmodifiableList(clientSslProviders);
         this.webSocketReconnectHandler = reconnectHandler;
+        ThreadSetupHandler.Action<Void, Runnable> task = new ThreadSetupHandler.Action<Void, Runnable>() {
+            @Override
+            public Void call(HttpServerExchange exchange, Runnable context) throws Exception {
+                context.run();
+                return null;
+            }
+        };
+        for(ThreadSetupHandler handler : threadSetupHandlers) {
+            task = handler.create(task);
+        }
+        this.invokeEndpointTask = task;
     }
 
     @Override
@@ -371,6 +388,7 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
                     .decoders(sec.getDecoders())
                     .encoders(sec.getEncoders())
                     .subprotocols(sec.getSubprotocols())
+                    .extensions(sec.getExtensions())
                     .configurator(configurator)
                     .build();
 
@@ -381,7 +399,12 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
             }
 
 
-            ConfiguredServerEndpoint confguredServerEndpoint = new ConfiguredServerEndpoint(config, instanceFactory, null, encodingFactory, annotatedEndpointFactory);
+            ConfiguredServerEndpoint confguredServerEndpoint;
+            if(annotatedEndpointFactory == null) {
+                confguredServerEndpoint = new ConfiguredServerEndpoint(config, instanceFactory, null, encodingFactory);
+            } else {
+                confguredServerEndpoint = new ConfiguredServerEndpoint(config, instanceFactory, null, encodingFactory, annotatedEndpointFactory, installedExtensions);
+            }
             WebSocketHandshakeHolder hand;
 
             WebSocketDeploymentInfo info = (WebSocketDeploymentInfo)request.getServletContext().getAttribute(WebSocketDeploymentInfo.ATTRIBUTE_NAME);
@@ -548,11 +571,10 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
      * @param invocation The invocation
      */
     public void invokeEndpointMethod(final Runnable invocation) {
-        ThreadSetupAction.Handle handle = threadSetupAction.setup(null);
         try {
-            invocation.run();
-        } finally {
-            handle.tearDown();
+            invokeEndpointTask.call(null, invocation);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -616,11 +638,12 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
                     .decoders(Arrays.asList(serverEndpoint.decoders()))
                     .encoders(Arrays.asList(serverEndpoint.encoders()))
                     .subprotocols(Arrays.asList(serverEndpoint.subprotocols()))
+                    .extensions(Collections.<Extension>emptyList())
                     .configurator(configurator)
                     .build();
 
 
-            ConfiguredServerEndpoint confguredServerEndpoint = new ConfiguredServerEndpoint(config, instanceFactory, template, encodingFactory, annotatedEndpointFactory);
+            ConfiguredServerEndpoint confguredServerEndpoint = new ConfiguredServerEndpoint(config, instanceFactory, template, encodingFactory, annotatedEndpointFactory, installedExtensions);
             configuredServerEndpoints.add(confguredServerEndpoint);
             handleAddingFilterMapping();
         } else if (clientEndpoint != null) {
@@ -695,7 +718,7 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
         }
         seenPaths.add(template);
         EncodingFactory encodingFactory = EncodingFactory.createFactory(classIntrospecter, endpoint.getDecoders(), endpoint.getEncoders());
-        ConfiguredServerEndpoint confguredServerEndpoint = new ConfiguredServerEndpoint(endpoint, null, template, encodingFactory, null);
+        ConfiguredServerEndpoint confguredServerEndpoint = new ConfiguredServerEndpoint(endpoint, null, template, encodingFactory);
         configuredServerEndpoints.add(confguredServerEndpoint);
         handleAddingFilterMapping();
     }
@@ -781,11 +804,11 @@ public class ServerWebSocketContainer implements ServerContainer, Closeable {
         return ret;
     }
 
-    private class ClientNegotiation extends WebSocketClientNegotiation {
+    private static class ClientNegotiation extends WebSocketClientNegotiation {
 
         private final ClientEndpointConfig config;
 
-        public ClientNegotiation(List<String> supportedSubProtocols, List<WebSocketExtension> supportedExtensions, ClientEndpointConfig config) {
+        ClientNegotiation(List<String> supportedSubProtocols, List<WebSocketExtension> supportedExtensions, ClientEndpointConfig config) {
             super(supportedSubProtocols, supportedExtensions);
             this.config = config;
         }

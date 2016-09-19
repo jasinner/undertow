@@ -31,6 +31,7 @@ import org.xnio.channels.SslChannel;
 import org.xnio.channels.StreamSourceChannel;
 
 import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -45,10 +46,15 @@ import java.util.concurrent.TimeUnit;
  */
 public class ConnectionSSLSessionInfo implements SSLSessionInfo {
 
+    private static final SSLPeerUnverifiedException PEER_UNVERIFIED_EXCEPTION = new SSLPeerUnverifiedException("");
+    private static final RenegotiationRequiredException RENEGOTIATION_REQUIRED_EXCEPTION = new RenegotiationRequiredException();
+
     private static final long MAX_RENEGOTIATION_WAIT = 30000;
 
     private final SslChannel channel;
     private final HttpServerConnection serverConnection;
+    private SSLPeerUnverifiedException unverified;
+    private RenegotiationRequiredException renegotiationRequiredException;
 
     public ConnectionSSLSessionInfo(SslChannel channel, HttpServerConnection serverConnection) {
         this.channel = channel;
@@ -67,29 +73,69 @@ public class ConnectionSSLSessionInfo implements SSLSessionInfo {
 
     @Override
     public Certificate[] getPeerCertificates() throws SSLPeerUnverifiedException, RenegotiationRequiredException {
+        if(unverified != null) {
+            throw unverified;
+        }
+        if(renegotiationRequiredException != null) {
+            throw renegotiationRequiredException;
+        }
         try {
             return channel.getSslSession().getPeerCertificates();
         } catch (SSLPeerUnverifiedException e) {
             try {
                 SslClientAuthMode sslClientAuthMode = channel.getOption(Options.SSL_CLIENT_AUTH_MODE);
                 if (sslClientAuthMode == SslClientAuthMode.NOT_REQUESTED) {
-                    throw new RenegotiationRequiredException();
+                    renegotiationRequiredException = RENEGOTIATION_REQUIRED_EXCEPTION;
+                    throw renegotiationRequiredException;
                 }
             } catch (IOException e1) {
                 //ignore, will not actually happen
             }
-            throw e;
+            unverified = PEER_UNVERIFIED_EXCEPTION;
+            throw unverified;
+        }
+    }
+
+    @Override
+    public X509Certificate[] getPeerCertificateChain() throws SSLPeerUnverifiedException, RenegotiationRequiredException {
+        if(unverified != null) {
+            throw unverified;
+        }
+        if(renegotiationRequiredException != null) {
+            throw renegotiationRequiredException;
+        }
+        try {
+            return channel.getSslSession().getPeerCertificateChain();
+        } catch (SSLPeerUnverifiedException e) {
+            try {
+                SslClientAuthMode sslClientAuthMode = channel.getOption(Options.SSL_CLIENT_AUTH_MODE);
+                if (sslClientAuthMode == SslClientAuthMode.NOT_REQUESTED) {
+                    renegotiationRequiredException = RENEGOTIATION_REQUIRED_EXCEPTION;
+                    throw renegotiationRequiredException;
+                }
+            } catch (IOException e1) {
+                //ignore, will not actually happen
+            }
+            unverified = PEER_UNVERIFIED_EXCEPTION;
+            throw unverified;
         }
     }
 
 
     @Override
     public void renegotiate(HttpServerExchange exchange, SslClientAuthMode sslClientAuthMode) throws IOException {
+        unverified = null;
+        renegotiationRequiredException = null;
         if (exchange.isRequestComplete()) {
             renegotiateNoRequest(exchange, sslClientAuthMode);
         } else {
             renegotiateBufferRequest(exchange, sslClientAuthMode);
         }
+    }
+
+    @Override
+    public SSLSession getSSLSession() {
+        return channel.getSslSession();
     }
 
     public void renegotiateBufferRequest(HttpServerExchange exchange, SslClientAuthMode newAuthMode) throws IOException {
@@ -187,23 +233,6 @@ public class ConnectionSSLSessionInfo implements SSLSessionInfo {
         }
     }
 
-
-    @Override
-    public X509Certificate[] getPeerCertificateChain() throws SSLPeerUnverifiedException, RenegotiationRequiredException {
-        try {
-            return channel.getSslSession().getPeerCertificateChain();
-        } catch (SSLPeerUnverifiedException e) {
-            try {
-                SslClientAuthMode sslClientAuthMode = channel.getOption(Options.SSL_CLIENT_AUTH_MODE);
-                if (sslClientAuthMode == SslClientAuthMode.NOT_REQUESTED) {
-                    throw new RenegotiationRequiredException();
-                }
-            } catch (IOException e1) {
-                //ignore, will not actually happen
-            }
-            throw e;
-        }
-    }
 
     private static class SslHandshakeWaiter implements ChannelListener<SslChannel> {
 

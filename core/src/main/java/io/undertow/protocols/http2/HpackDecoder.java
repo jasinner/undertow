@@ -163,7 +163,7 @@ public class HpackDecoder {
                     return;
                 }
             } else {
-                throw new RuntimeException("Not yet implemented");
+                throw UndertowMessages.MESSAGES.invalidHpackEncoding(b);
             }
         }
     }
@@ -220,7 +220,7 @@ public class HpackDecoder {
         byte data = buffer.get(buffer.position());
 
         int length = Hpack.decodeInteger(buffer, 7);
-        if (buffer.remaining() < length) {
+        if (buffer.remaining() < length || length == -1) {
             return null;
         }
         boolean huffman = (data & 0b10000000) != 0;
@@ -349,7 +349,7 @@ public class HpackDecoder {
 
     public interface HeaderEmitter {
 
-        void emitHeader(HttpString name, String value, boolean neverIndex);
+        void emitHeader(HttpString name, String value, boolean neverIndex) throws HpackException;
     }
 
 

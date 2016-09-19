@@ -56,7 +56,7 @@ public class PerMessageDeflateHandshake implements ExtensionHandshake {
     /**
      * Default configuration for DEFLATE algorithm implementation
      */
-    public static final int DEFAULT_DEFLATER = Deflater.BEST_SPEED;
+    public static final int DEFAULT_DEFLATER = Deflater.DEFAULT_COMPRESSION;
 
     public PerMessageDeflateHandshake() {
         this(false);
@@ -151,6 +151,7 @@ public class PerMessageDeflateHandshake implements ExtensionHandshake {
                 return null;
             }
         }
+        WebSocketLogger.EXTENSION_LOGGER.debugf("Negotiated extension %s for handshake %s", negotiated, extension);
         return negotiated;
     }
 

@@ -137,6 +137,10 @@ public class UndertowXnioSsl extends XnioSsl {
         }
     }
 
+    public static SslConduit getSslConduit(SslConnection connection) {
+        return ((UndertowSslConnection) connection).getSslConduit();
+    }
+
     @SuppressWarnings("deprecation")
     public IoFuture<ConnectedSslStreamChannel> connectSsl(final XnioWorker worker, final InetSocketAddress bindAddress, final InetSocketAddress destination, final ChannelListener<? super ConnectedSslStreamChannel> openListener, final ChannelListener<? super BoundChannel> bindListener, final OptionMap optionMap) {
         final FutureResult<ConnectedSslStreamChannel> futureResult = new FutureResult<>(IoUtils.directExecutor());
@@ -305,7 +309,7 @@ public class UndertowXnioSsl extends XnioSsl {
         private final FutureResult<SslConnection> futureResult;
         private final ChannelListener<? super SslConnection> openListener;
 
-        public StreamConnectionChannelListener(OptionMap optionMap, InetSocketAddress destination, FutureResult<SslConnection> futureResult, ChannelListener<? super SslConnection> openListener) {
+        StreamConnectionChannelListener(OptionMap optionMap, InetSocketAddress destination, FutureResult<SslConnection> futureResult, ChannelListener<? super SslConnection> openListener) {
             this.optionMap = optionMap;
             this.destination = destination;
             this.futureResult = futureResult;
@@ -313,11 +317,15 @@ public class UndertowXnioSsl extends XnioSsl {
         }
 
         public void handleEvent(final StreamConnection connection) {
-            final SslConnection wrappedConnection = new UndertowSslConnection(connection, JsseSslUtils.createSSLEngine(sslContext, optionMap, destination), bufferPool);
-            if (! futureResult.setResult(wrappedConnection)) {
-                IoUtils.safeClose(connection);
-            } else {
-                ChannelListeners.invokeChannelListener(wrappedConnection, openListener);
+            try {
+                final SslConnection wrappedConnection = new UndertowSslConnection(connection, JsseSslUtils.createSSLEngine(sslContext, optionMap, destination), bufferPool);
+                if (!futureResult.setResult(wrappedConnection)) {
+                    IoUtils.safeClose(connection);
+                } else {
+                    ChannelListeners.invokeChannelListener(wrappedConnection, openListener);
+                }
+            } catch (Throwable e) {
+                futureResult.setException(new IOException(e));
             }
         }
     }

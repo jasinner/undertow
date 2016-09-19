@@ -59,6 +59,7 @@ final class HttpResponseConduit extends AbstractStreamSinkConduit<StreamSinkCond
     private int valueIdx;
     private int charIndex;
     private PooledByteBuffer pooledBuffer;
+    private PooledByteBuffer pooledFileTransferBuffer;
     private HttpServerExchange exchange;
 
     private ByteBuffer[] writevBuffer;
@@ -288,7 +289,12 @@ final class HttpResponseConduit extends AbstractStreamSinkConduit<StreamSinkCond
     private static void writeString(ByteBuffer buffer, String string) {
         int length = string.length();
         for (int charIndex = 0; charIndex < length; charIndex++) {
-            buffer.put((byte) string.charAt(charIndex));
+            char c = string.charAt(charIndex);
+            if(c != '\r' && c != '\n') {
+                buffer.put((byte) c);
+            } else {
+                buffer.put((byte) ' ');
+            }
         }
     }
 
@@ -649,17 +655,41 @@ final class HttpResponseConduit extends AbstractStreamSinkConduit<StreamSinkCond
     public long transferFrom(final FileChannel src, final long position, final long count) throws IOException {
         try {
             if (state != 0) {
-                final PooledByteBuffer pooled = exchange.getConnection().getByteBufferPool().allocate();
-                ByteBuffer buffer = pooled.getBuffer();
-                try {
-                    int res = src.read(buffer);
-                    if (res <= 0) {
-                        return res;
+                if(pooledFileTransferBuffer != null) {
+                    try {
+                        return write(pooledFileTransferBuffer.getBuffer());
+                    } catch (IOException|RuntimeException e) {
+                        if(pooledFileTransferBuffer != null) {
+                            pooledFileTransferBuffer.close();
+                            pooledFileTransferBuffer = null;
+                        }
+                        throw e;
+                    } finally {
+                        if(pooledFileTransferBuffer != null) {
+                            if (!pooledFileTransferBuffer.getBuffer().hasRemaining()) {
+                                pooledFileTransferBuffer.close();
+                                pooledFileTransferBuffer = null;
+                            }
+                        }
                     }
-                    buffer.flip();
-                    return write(buffer);
-                } finally {
-                    pooled.close();
+                } else {
+                    final PooledByteBuffer pooled = exchange.getConnection().getByteBufferPool().allocate();
+
+                    ByteBuffer buffer = pooled.getBuffer();
+                    try {
+                        int res = src.read(buffer);
+                        buffer.flip();
+                        if (res <= 0) {
+                            return res;
+                        }
+                        return write(buffer);
+                    } finally {
+                        if(buffer.hasRemaining()) {
+                            pooledFileTransferBuffer = pooled;
+                        } else {
+                            pooled.close();
+                        }
+                    }
                 }
             } else {
                 return next.transferFrom(src, position, count);
@@ -758,6 +788,10 @@ final class HttpResponseConduit extends AbstractStreamSinkConduit<StreamSinkCond
             if (pooledBuffer != null) {
                 bufferDone();
             }
+            if(pooledFileTransferBuffer != null) {
+                pooledFileTransferBuffer.close();
+                pooledFileTransferBuffer = null;
+            }
         }
     }
 
@@ -769,6 +803,10 @@ final class HttpResponseConduit extends AbstractStreamSinkConduit<StreamSinkCond
         done = true;
         if(pooledBuffer != null) {
             bufferDone();
+        }
+        if(pooledFileTransferBuffer != null) {
+            pooledFileTransferBuffer.close();
+            pooledFileTransferBuffer = null;
         }
     }
 }

@@ -18,6 +18,8 @@
 package io.undertow.security.impl;
 
 import static io.undertow.UndertowMessages.MESSAGES;
+
+import io.undertow.UndertowLogger;
 import io.undertow.security.api.NotificationReceiver;
 import io.undertow.security.api.SecurityContext;
 import io.undertow.security.api.SecurityNotification;
@@ -82,12 +84,14 @@ public abstract class AbstractSecurityContext implements SecurityContext {
         this.account = account;
         this.mechanismName = mechanism;
 
+        UndertowLogger.SECURITY_LOGGER.debugf("Authenticated as %s, roles %s", account.getPrincipal().getName(), account.getRoles());
         sendNoticiation(new SecurityNotification(exchange, EventType.AUTHENTICATED, account, mechanism, programatic,
                 MESSAGES.userAuthenticated(account.getPrincipal().getName()), cachingRequired));
     }
 
     @Override
     public void authenticationFailed(String message, String mechanism) {
+        UndertowLogger.SECURITY_LOGGER.debugf("Authentication failed with message %s and mechanism %s for %s", message, mechanism, exchange);
         sendNoticiation(new SecurityNotification(exchange, EventType.FAILED_AUTHENTICATION, null, mechanism, false, message, true));
     }
 
@@ -134,6 +138,7 @@ public abstract class AbstractSecurityContext implements SecurityContext {
         if (!isAuthenticated()) {
             return;
         }
+        UndertowLogger.SECURITY_LOGGER.debugf("Logged out %s", exchange);
         sendNoticiation(new SecurityNotification(exchange, SecurityNotification.EventType.LOGGED_OUT, account, mechanismName, true,
                 MESSAGES.userLoggedOut(account.getPrincipal().getName()), true));
 

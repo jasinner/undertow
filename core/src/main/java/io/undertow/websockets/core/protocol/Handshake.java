@@ -22,7 +22,6 @@ import io.undertow.util.Headers;
 import io.undertow.websockets.WebSocketExtension;
 import io.undertow.websockets.core.WebSocketChannel;
 import io.undertow.websockets.core.WebSocketVersion;
-import io.undertow.websockets.extensions.CompositeExtensionFunction;
 import io.undertow.websockets.extensions.ExtensionFunction;
 import io.undertow.websockets.extensions.ExtensionHandshake;
 import io.undertow.websockets.spi.WebSocketHttpExchange;
@@ -225,7 +224,7 @@ public abstract class Handshake {
      * @param exchange the exchange used to retrieve negotiated extensions
      * @return         a list of {@code ExtensionFunction} with the implementation of the extensions
      */
-    protected final ExtensionFunction initExtensions(final WebSocketHttpExchange exchange) {
+    protected final List<ExtensionFunction> initExtensions(final WebSocketHttpExchange exchange) {
         String extHeader = exchange.getResponseHeaders().get(Headers.SEC_WEB_SOCKET_EXTENSIONS_STRING) != null ?
                 exchange.getResponseHeaders().get(Headers.SEC_WEB_SOCKET_EXTENSIONS_STRING).get(0) : null;
 
@@ -242,6 +241,6 @@ public abstract class Handshake {
                 }
             }
         }
-        return CompositeExtensionFunction.compose(negotiated);
+        return negotiated;
     }
 }

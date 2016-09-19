@@ -25,6 +25,7 @@ import org.xnio.Bits;
 import org.xnio.ChannelListener;
 import org.xnio.ChannelListeners;
 import io.undertow.connector.PooledByteBuffer;
+import org.xnio.IoUtils;
 import org.xnio.channels.StreamSinkChannel;
 
 import io.undertow.server.protocol.framed.FrameHeaderData;
@@ -46,6 +47,9 @@ public class Http2StreamSourceChannel extends AbstractHttp2StreamSourceChannel i
     private Http2HeadersStreamSinkChannel response;
     private int flowControlWindow;
     private ChannelListener<Http2StreamSourceChannel> completionListener;
+
+    private int remainingPadding;
+
     /**
      * This is a bit of a hack, basically it allows the container to delay sending a RST_STREAM on a channel that is knows is broken,
      * because it wants to delay the RST until after the response has been set
@@ -64,7 +68,29 @@ public class Http2StreamSourceChannel extends AbstractHttp2StreamSourceChannel i
     @Override
     protected void handleHeaderData(FrameHeaderData headerData) {
         Http2FrameHeaderParser data = (Http2FrameHeaderParser) headerData;
+        Http2PushBackParser parser = data.getParser();
+        if(parser instanceof Http2DataFrameParser) {
+            remainingPadding = ((Http2DataFrameParser) parser).getPadding();
+        }
         handleFinalFrame(data);
+    }
+
+    @Override
+    protected long updateFrameDataRemaining(PooledByteBuffer data, long frameDataRemaining) {
+        long actualDataRemaining = frameDataRemaining - remainingPadding;
+        if(data.getBuffer().remaining() > actualDataRemaining) {
+            long paddingThisBuffer = data.getBuffer().remaining() - actualDataRemaining;
+            data.getBuffer().limit((int) (data.getBuffer().position() + actualDataRemaining));
+            remainingPadding -= paddingThisBuffer;
+            try {
+                updateFlowControlWindow((int) paddingThisBuffer);
+            } catch (IOException e) {
+                IoUtils.safeClose(getFramedChannel());
+                throw new RuntimeException(e);
+            }
+            return frameDataRemaining - paddingThisBuffer;
+        }
+        return frameDataRemaining;
     }
 
     void handleFinalFrame(Http2FrameHeaderParser headerData) {
@@ -133,20 +159,21 @@ public class Http2StreamSourceChannel extends AbstractHttp2StreamSourceChannel i
         return read;
     }
 
-    private void updateFlowControlWindow(final int read) {
+    private void updateFlowControlWindow(final int read) throws IOException {
         if (read <= 0) {
             return;
         }
         flowControlWindow -= read;
         //TODO: RST stream if flow control limits are exceeded?
         //TODO: make this configurable, we should be able to set the policy that is used to determine when to update the window size
-        Http2Channel spdyChannel = getHttp2Channel();
-        spdyChannel.updateReceiveFlowControlWindow(read);
-        int initialWindowSize = spdyChannel.getInitialReceiveWindowSize();
+        Http2Channel http2Channel = getHttp2Channel();
+        http2Channel.updateReceiveFlowControlWindow(read);
+        int initialWindowSize = http2Channel.getInitialReceiveWindowSize();
+        //TODO: this is not great, as we may have already received all the data so there is no need, need to have a way to figure out if all data is buffered
         if (flowControlWindow < (initialWindowSize / 2)) {
             int delta = initialWindowSize - flowControlWindow;
             flowControlWindow += delta;
-            spdyChannel.sendUpdateWindowSize(streamId, delta);
+            http2Channel.sendUpdateWindowSize(streamId, delta);
         }
     }
 
@@ -189,10 +216,8 @@ public class Http2StreamSourceChannel extends AbstractHttp2StreamSourceChannel i
         }
         if(!ignoreForceClose) {
             getHttp2Channel().sendRstStream(streamId, Http2Channel.ERROR_CANCEL);
-        } else {
-            //normally sending the RST would mark this broken
-            markStreamBroken();
         }
+        markStreamBroken();
     }
 
     public void setIgnoreForceClose(boolean ignoreForceClose) {

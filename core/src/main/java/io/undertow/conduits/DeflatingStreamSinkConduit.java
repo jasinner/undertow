@@ -28,6 +28,8 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
+
+import io.undertow.server.Connectors;
 import org.xnio.IoUtils;
 import io.undertow.connector.PooledByteBuffer;
 import org.xnio.XnioIoThread;
@@ -50,7 +52,6 @@ import io.undertow.util.Headers;
  */
 public class DeflatingStreamSinkConduit implements StreamSinkConduit {
 
-    public static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
     protected final Deflater deflater;
     private final ConduitFactory<StreamSinkConduit> conduitFactory;
     private final HttpServerExchange exchange;
@@ -86,6 +87,7 @@ public class DeflatingStreamSinkConduit implements StreamSinkConduit {
         this.currentBuffer = exchange.getConnection().getByteBufferPool().allocate();
         this.exchange = exchange;
         this.conduitFactory = conduitFactory;
+        setWriteReadyHandler(new WriteReadyHandler.ChannelListenerHandler<>(Connectors.getConduitSinkChannel(exchange)));
     }
 
     @Override
@@ -111,6 +113,7 @@ public class DeflatingStreamSinkConduit implements StreamSinkConduit {
             src.get(data);
             preDeflate(data);
             deflater.setInput(data);
+            Connectors.updateResponseBytesSent(exchange, 0 - data.length);
             deflateData(false);
             return data.length;
         } catch (IOException e) {
@@ -311,6 +314,7 @@ public class DeflatingStreamSinkConduit implements StreamSinkConduit {
                             state |= WRITTEN_TRAILER;
                             byte[] data = getTrailer();
                             if (data != null) {
+                                Connectors.updateResponseBytesSent(exchange, data.length);
                                 if(additionalBuffer != null) {
                                     byte[] newData = new byte[additionalBuffer.remaining() + data.length];
                                     int pos = 0;
@@ -358,8 +362,11 @@ public class DeflatingStreamSinkConduit implements StreamSinkConduit {
                             this.next = createNextChannel();
                         }
                         deflateData(true);
-                        currentBuffer.getBuffer().flip();
-                        this.state |= FLUSHING_BUFFER;
+                        if(allAreClear(state, FLUSHING_BUFFER)) {
+                            //deflateData can cause this to be change
+                            currentBuffer.getBuffer().flip();
+                            this.state |= FLUSHING_BUFFER;
+                        }
                     }
                     if(!performFlushIfRequired()) {
                         return false;
@@ -449,25 +456,27 @@ public class DeflatingStreamSinkConduit implements StreamSinkConduit {
         //we don't need to flush here, as this should have been called already by the time we get to
         //this point
         boolean nextCreated = false;
-        try {
+        try (PooledByteBuffer arrayPooled = this.exchange.getConnection().getByteBufferPool().getArrayBackedPool().allocate()) {
             PooledByteBuffer pooled = this.currentBuffer;
             final ByteBuffer outputBuffer = pooled.getBuffer();
 
             final boolean shutdown = anyAreSet(state, SHUTDOWN);
-
-            byte[] buffer = new byte[1024]; //TODO: we should pool this and make it configurable or something
+            ByteBuffer buf = arrayPooled.getBuffer();
             while (force || !deflater.needsInput() || (shutdown && !deflater.finished())) {
-                int count = deflater.deflate(buffer, 0, buffer.length, force ? Deflater.SYNC_FLUSH: Deflater.NO_FLUSH);
+                int count = deflater.deflate(buf.array(), buf.arrayOffset(), buf.remaining(), force ? Deflater.SYNC_FLUSH: Deflater.NO_FLUSH);
+                Connectors.updateResponseBytesSent(exchange, count);
                 if (count != 0) {
                     int remaining = outputBuffer.remaining();
                     if (remaining > count) {
-                        outputBuffer.put(buffer, 0, count);
+                        outputBuffer.put(buf.array(), buf.arrayOffset(), count);
                     } else {
                         if (remaining == count) {
-                            outputBuffer.put(buffer, 0, count);
+                            outputBuffer.put(buf.array(), buf.arrayOffset(), count);
                         } else {
-                            outputBuffer.put(buffer, 0, remaining);
-                            additionalBuffer = ByteBuffer.wrap(buffer, remaining, count - remaining);
+                            outputBuffer.put(buf.array(), buf.arrayOffset(), remaining);
+                            additionalBuffer = ByteBuffer.allocate(count - remaining);
+                            additionalBuffer.put(buf.array(), buf.arrayOffset() + remaining, count - remaining);
+                            additionalBuffer.flip();
                         }
                         outputBuffer.flip();
                         this.state |= FLUSHING_BUFFER;

@@ -48,22 +48,6 @@ import io.undertow.util.LocaleUtils;
 import io.undertow.util.Methods;
 import org.xnio.LocalSocketAddress;
 
-import javax.servlet.AsyncContext;
-import javax.servlet.DispatcherType;
-import javax.servlet.RequestDispatcher;
-import javax.servlet.ServletException;
-import javax.servlet.ServletInputStream;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletRequestWrapper;
-import javax.servlet.ServletResponse;
-import javax.servlet.ServletResponseWrapper;
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-import javax.servlet.http.HttpSession;
-import javax.servlet.http.HttpUpgradeHandler;
-import javax.servlet.http.Part;
-import javax.servlet.http.PushBuilder;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -88,6 +72,23 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import javax.servlet.AsyncContext;
+import javax.servlet.DispatcherType;
+import javax.servlet.RequestDispatcher;
+import javax.servlet.ServletException;
+import javax.servlet.ServletInputStream;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletRequestWrapper;
+import javax.servlet.ServletResponse;
+import javax.servlet.ServletResponseWrapper;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+import javax.servlet.http.HttpUpgradeHandler;
+import javax.servlet.http.Mapping;
+import javax.servlet.http.Part;
+import javax.servlet.http.PushBuilder;
 
 /**
  * The http servlet request implementation. This class is not thread safe
@@ -218,6 +219,33 @@ public final class HttpServletRequestImpl implements HttpServletRequest {
             headers.add(i.toString());
         }
         return new IteratorEnumeration<>(headers.iterator());
+    }
+
+    @Override
+    public Mapping getMapping() {
+        ServletRequestContext src = exchange.getAttachment(ServletRequestContext.ATTACHMENT_KEY);
+        ServletPathMatch match = src.getOriginalServletPathMatch();
+        String matchValue;
+        switch (match.getMappingMatch()) {
+            case EXACT:
+                matchValue = getServletPath();
+                break;
+            case DEFAULT:
+                matchValue = "/";
+                break;
+            case CONTEXT_ROOT:
+                matchValue = "";
+                break;
+            case PATH:
+                matchValue = match.getRemaining();
+                break;
+            case EXTENSION:
+                matchValue = match.getMatched().substring(0, match.getMatched().length() - match.getMatchString().length() + 1);
+                break;
+            default:
+                matchValue = match.getRemaining();
+        }
+        return new MappingImpl(matchValue, match.getMatchString(), match.getMappingMatch());
     }
 
     @Override
@@ -490,7 +518,7 @@ public final class HttpServletRequestImpl implements HttpServletRequest {
         try {
             InstanceFactory<T> factory = servletContext.getDeployment().getDeploymentInfo().getClassIntrospecter().createInstanceFactory(handlerClass);
             final InstanceHandle<T> instance = factory.createInstance();
-            exchange.upgradeChannel(new ServletUpgradeListener<>(instance, servletContext.getDeployment().getThreadSetupAction(), exchange));
+            exchange.upgradeChannel(new ServletUpgradeListener<>(instance, servletContext.getDeployment(), exchange));
             return instance.getInstance();
         } catch (InstantiationException e) {
             throw new RuntimeException(e);
@@ -511,7 +539,10 @@ public final class HttpServletRequestImpl implements HttpServletRequest {
                 if(formData != null) {
                     for (final String namedPart : formData) {
                         for (FormData.FormValue part : formData.get(namedPart)) {
-                            parts.add(new PartImpl(namedPart, part, requestContext.getOriginalServletPathMatch().getServletChain().getManagedServlet().getMultipartConfig(), servletContext));
+                            parts.add(new PartImpl(namedPart,
+                                    part,
+                                    requestContext.getOriginalServletPathMatch().getServletChain().getManagedServlet().getMultipartConfig(),
+                                    servletContext, this));
                         }
                     }
                 }
@@ -730,7 +761,6 @@ public final class HttpServletRequestImpl implements HttpServletRequest {
                         }
                     } else {
                         final ArrayList<String> values = new ArrayList<>();
-                        int i = 0;
                         for (final FormData.FormValue v : val) {
                             if(!v.isFile()) {
                                 values.add(v.getValue());

@@ -71,7 +71,9 @@ import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.undertow.client.UndertowClientMessages.MESSAGES;
 import static io.undertow.util.Headers.CLOSE;
@@ -134,6 +136,7 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
      * The actual connection if this has been upgraded to h2c
      */
     private ClientConnection http2Delegate;
+    private final List<ChannelListener<ClientConnection>> closeListeners = new CopyOnWriteArrayList<>();
 
     HttpClientConnection(final StreamConnection connection, final OptionMap options, final ByteBufferPool bufferPool) {
 
@@ -172,6 +175,10 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
                         pooledBuffer.close();
                     }
                 } catch (Throwable ignored){}
+
+                for(ChannelListener<ClientConnection> listener : closeListeners) {
+                    listener.handleEvent(HttpClientConnection.this);
+                }
             }
         });
     }
@@ -292,6 +299,11 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
             return false;
         }
         return true;
+    }
+
+    @Override
+    public void addCloseListener(ChannelListener<ClientConnection> listener) {
+        closeListeners.add(listener);
     }
 
     @Override
@@ -558,6 +570,12 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
                 if(connectionString != null) {
                     if (HttpString.tryFromString(connectionString).equals(Headers.CLOSE)) {
                         HttpClientConnection.this.state |= CLOSE_REQ;
+                        //we are going to close, kill any queued connections
+                        HttpClientExchange ex = pendingQueue.poll();
+                        while (ex != null) {
+                            ex.setFailed(new IOException(UndertowClientMessages.MESSAGES.connectionClosed()));
+                            ex = pendingQueue.poll();
+                        }
                     }
                 }
                 if(response.getResponseCode() == StatusCodes.SWITCHING_PROTOCOLS && Http2Channel.CLEARTEXT_UPGRADE_STRING.equals(response.getResponseHeaders().getFirst(Headers.UPGRADE))) {
@@ -610,8 +628,9 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
 
     protected void doHttp2Upgrade() {
         try {
-            Http2Channel http2Channel = new Http2Channel(this.performUpgrade(), null, bufferPool, null, true, true, options);
-            Http2ClientConnection http2ClientConnection = new Http2ClientConnection(http2Channel, currentRequest.getResponseCallback(), currentRequest.getRequest(), currentRequest.getRequest().getRequestHeaders().getFirst(Headers.HOST), clientStatistics);
+            StreamConnection connectedStreamChannel = this.performUpgrade();
+            Http2Channel http2Channel = new Http2Channel(connectedStreamChannel, null, bufferPool, null, true, true, options);
+            Http2ClientConnection http2ClientConnection = new Http2ClientConnection(http2Channel, currentRequest.getResponseCallback(), currentRequest.getRequest(), currentRequest.getRequest().getRequestHeaders().getFirst(Headers.HOST), clientStatistics, false);
             http2ClientConnection.getCloseSetter().set(new ChannelListener<ClientConnection>() {
                 @Override
                 public void handleEvent(ClientConnection channel) {
@@ -619,6 +638,7 @@ class HttpClientConnection extends AbstractAttachable implements Closeable, Clie
                 }
             });
             http2Delegate = http2ClientConnection;
+            connectedStreamChannel.getSourceChannel().wakeupReads(); //make sure the read listener is immediately invoked, as it may not happen if data is pushed back
             currentRequest = null;
         } catch (IOException e) {
             UndertowLogger.REQUEST_IO_LOGGER.ioException(e);

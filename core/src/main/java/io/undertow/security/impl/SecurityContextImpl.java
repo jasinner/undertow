@@ -17,6 +17,7 @@
  */
 package io.undertow.security.impl;
 
+import io.undertow.UndertowLogger;
 import io.undertow.UndertowMessages;
 import io.undertow.security.api.AuthenticationMechanism;
 import io.undertow.security.api.AuthenticationMechanism.AuthenticationMechanismOutcome;
@@ -42,6 +43,7 @@ import java.util.List;
  * @author Stuart Douglas
  */
 public class SecurityContextImpl extends AbstractSecurityContext implements AuthenticationMechanismContext {
+
 
     private static final RuntimePermission PERMISSION = new RuntimePermission("MODIFY_UNDERTOW_SECURITY_CONTEXT");
 
@@ -81,6 +83,7 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
 
     @Override
     public boolean authenticate() {
+        UndertowLogger.SECURITY_LOGGER.debugf("Attempting to authenticate %s, authentication required: %s", exchange, isAuthenticationRequired());
         if(authenticationState == AuthenticationState.ATTEMPTED || (authenticationState == AuthenticationState.CHALLENGE_SENT && !exchange.isResponseStarted())) {
             //we are re-attempted, so we just reset the state
             //see UNDERTOW-263
@@ -104,6 +107,7 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
             return authTransition();
 
         } else {
+            UndertowLogger.SECURITY_LOGGER.debugf("Authentication result was %s for %s", authenticationState, exchange);
             // Keep in mind this switch statement is only called after a call to authTransitionRequired.
             switch (authenticationState) {
                 case NOT_ATTEMPTED: // No constraint was set that mandated authentication so not reason to hold up the request.
@@ -122,6 +126,7 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
     }
 
     private AuthenticationState sendChallenges() {
+        UndertowLogger.SECURITY_LOGGER.debugf("Sending authentication challenge for %s", exchange);
         return new ChallengeSender(authMechanisms, exchange).transition();
     }
 
@@ -186,6 +191,7 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
     @Override
     public boolean login(final String username, final String password) {
 
+        UndertowLogger.SECURITY_LOGGER.debugf("Attempting programatic login for user %s for request %s", username, exchange);
 
         final Account account;
         if(System.getSecurityManager() == null) {
@@ -211,6 +217,12 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
 
     @Override
     public void logout() {
+        Account authenticatedAccount = getAuthenticatedAccount();
+        if(authenticatedAccount != null) {
+            UndertowLogger.SECURITY_LOGGER.debugf("Logging out user %s for %s", authenticatedAccount.getPrincipal().getName(), exchange);
+        } else {
+            UndertowLogger.SECURITY_LOGGER.debugf("Logout called with no authenticated user in exchange %s", exchange);
+        }
         super.logout();
         this.authenticationState = AuthenticationState.NOT_ATTEMPTED;
     }
@@ -231,6 +243,7 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
                 final AuthenticationMechanism mechanism = currentMethod.item;
                 currentMethod = currentMethod.next;
                 AuthenticationMechanismOutcome outcome = mechanism.authenticate(exchange, SecurityContextImpl.this);
+                UndertowLogger.SECURITY_LOGGER.debugf("Authentication outcome was %s with method %s for %s", outcome, mechanism, exchange);
 
                 if (outcome == null) {
                     throw UndertowMessages.MESSAGES.authMechanismOutcomeNull();
@@ -268,8 +281,8 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
         private Node<AuthenticationMechanism> currentMethod;
         private final HttpServerExchange exchange;
 
-        private boolean atLeastOneChallenge = false;
         private Integer chosenStatusCode = null;
+        private boolean challengeSent = false;
 
         private ChallengeSender(Node<AuthenticationMechanism> currentMethod, final HttpServerExchange exchange) {
             this.exchange = exchange;
@@ -283,38 +296,35 @@ public class SecurityContextImpl extends AbstractSecurityContext implements Auth
                 ChallengeResult result = mechanism.sendChallenge(exchange, SecurityContextImpl.this);
 
                 if (result.isChallengeSent()) {
-                    atLeastOneChallenge = true;
+                    challengeSent = true;
                     Integer desiredCode = result.getDesiredResponseCode();
-                    if (chosenStatusCode == null) {
+                    if (desiredCode != null && (chosenStatusCode == null || chosenStatusCode.equals(StatusCodes.OK))) {
                         chosenStatusCode = desiredCode;
-                    } else if (desiredCode != null) {
-                        if (chosenStatusCode.equals(StatusCodes.OK)) {
-                            // Allows a more specific code to be chosen.
-                            // TODO - Still need a more complex code resolution strategy if many different codes are
-                            // returned (Although those mechanisms may just never work together.)
-                            chosenStatusCode = desiredCode;
+                        if (chosenStatusCode.equals(StatusCodes.OK) == false) {
+                            if(!exchange.isResponseStarted()) {
+                                exchange.setStatusCode(chosenStatusCode);
+                            }
                         }
                     }
                 }
-
 
                 // We always transition so we can reach the end of the list and hit the else.
                 return transition();
 
             } else {
                 if(!exchange.isResponseStarted()) {
-                    // Iterated all mechanisms, now need to select a suitable status code.
-                    if (atLeastOneChallenge) {
-                        if (chosenStatusCode != null) {
-                            exchange.setStatusCode(chosenStatusCode);
+                    // Iterated all mechanisms, if OK it will not be set yet.
+                    if (chosenStatusCode == null) {
+                        if (challengeSent == false) {
+                            // No mechanism generated a challenge so send a 403 as our challenge - i.e. just rejecting the request.
+                            exchange.setStatusCode(StatusCodes.FORBIDDEN);
                         }
-                    } else {
-                        // No mechanism generated a challenge so send a 403 as our challenge - i.e. just rejecting the request.
-                        exchange.setStatusCode(StatusCodes.FORBIDDEN);
+                    } else if (chosenStatusCode.equals(StatusCodes.OK)) {
+                        exchange.setStatusCode(chosenStatusCode);
                     }
                 }
-                return AuthenticationState.CHALLENGE_SENT;
 
+                return AuthenticationState.CHALLENGE_SENT;
             }
         }
 

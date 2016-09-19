@@ -357,8 +357,13 @@ public class AjpRequestParser {
                             //we need to read the name. We overload currentIntegerPart to avoid adding another state field
                             state.currentIntegerPart = 1;
                         } else {
+                            if(val == 0 || val >= ATTRIBUTES.length) {
+                                //ignore unknown codes for compatibility
+                                continue;
+                            }
                             state.currentAttribute = ATTRIBUTES[val];
                         }
+
                     }
                     if (state.currentIntegerPart == 1) {
                         StringHolder result = parseString(buf, state, StringType.OTHER);
@@ -387,8 +392,9 @@ public class AjpRequestParser {
                     }
                     //query string.
                     if (state.currentAttribute.equals(QUERY_STRING)) {
-                        exchange.setQueryString(result == null ? "" : result);
-                        URLUtils.parseQueryString(result, exchange, encoding, doDecode);
+                        String resultAsQueryString = result == null ? "" : result;
+                        exchange.setQueryString(resultAsQueryString);
+                        URLUtils.parseQueryString(resultAsQueryString, exchange, encoding, doDecode);
                     } else if (state.currentAttribute.equals(REMOTE_USER)) {
                         exchange.putAttachment(ExternalAuthenticationMechanism.EXTERNAL_PRINCIPAL, result);
                     } else if (state.currentAttribute.equals(AUTH_TYPE)) {

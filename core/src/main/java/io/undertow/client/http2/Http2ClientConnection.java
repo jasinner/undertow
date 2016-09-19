@@ -18,17 +18,28 @@
 
 package io.undertow.client.http2;
 
+import static io.undertow.protocols.http2.Http2Channel.AUTHORITY;
+import static io.undertow.protocols.http2.Http2Channel.METHOD;
+import static io.undertow.protocols.http2.Http2Channel.PATH;
+import static io.undertow.protocols.http2.Http2Channel.SCHEME;
+import static io.undertow.protocols.http2.Http2Channel.STATUS;
 import static io.undertow.util.Headers.CONTENT_LENGTH;
 import static io.undertow.util.Headers.TRANSFER_ENCODING;
 
 import java.io.IOException;
 import java.net.SocketAddress;
+import java.nio.channels.ClosedChannelException;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import io.undertow.client.ClientStatistics;
+import io.undertow.protocols.http2.Http2GoAwayStreamSourceChannel;
 import io.undertow.protocols.http2.Http2PushPromiseStreamSourceChannel;
 import io.undertow.util.HeaderValues;
+import io.undertow.util.Methods;
+import io.undertow.util.NetworkUtils;
 import io.undertow.util.Protocols;
 import org.xnio.ChannelExceptionHandler;
 import org.xnio.ChannelListener;
@@ -63,13 +74,6 @@ import io.undertow.util.HttpString;
  */
 public class Http2ClientConnection implements ClientConnection {
 
-
-    static final HttpString METHOD = new HttpString(":method");
-    static final HttpString PATH = new HttpString(":path");
-    static final HttpString SCHEME = new HttpString(":scheme");
-    static final HttpString AUTHORITY = new HttpString(":authority");
-    static final HttpString STATUS = new HttpString(":status");
-
     private final Http2Channel http2Channel;
     private final ChannelListener.SimpleSetter<ClientConnection> closeSetter = new ChannelListener.SimpleSetter<>();
 
@@ -78,28 +82,35 @@ public class Http2ClientConnection implements ClientConnection {
     private boolean initialUpgradeRequest;
     private final String defaultHost;
     private final ClientStatistics clientStatistics;
+    private final List<ChannelListener<ClientConnection>> closeListeners = new CopyOnWriteArrayList<>();
+    private final boolean secure;
 
-    public Http2ClientConnection(Http2Channel http2Channel, boolean initialUpgradeRequest, String defaultHost, ClientStatistics clientStatistics) {
+    public Http2ClientConnection(Http2Channel http2Channel, boolean initialUpgradeRequest, String defaultHost, ClientStatistics clientStatistics, boolean secure) {
 
         this.http2Channel = http2Channel;
         this.defaultHost = defaultHost;
         this.clientStatistics = clientStatistics;
+        this.secure = secure;
         http2Channel.getReceiveSetter().set(new Http2ReceiveListener());
         http2Channel.resumeReceives();
         http2Channel.addCloseTask(new ChannelListener<Http2Channel>() {
             @Override
             public void handleEvent(Http2Channel channel) {
                 ChannelListeners.invokeChannelListener(Http2ClientConnection.this, closeSetter.get());
+                for(ChannelListener<ClientConnection> listener : closeListeners) {
+                    listener.handleEvent(Http2ClientConnection.this);
+                }
             }
         });
         this.initialUpgradeRequest = initialUpgradeRequest;
     }
 
-    public Http2ClientConnection(Http2Channel http2Channel, ClientCallback<ClientExchange> upgradeReadyCallback, ClientRequest clientRequest, String defaultHost, ClientStatistics clientStatistics) {
+    public Http2ClientConnection(Http2Channel http2Channel, ClientCallback<ClientExchange> upgradeReadyCallback, ClientRequest clientRequest, String defaultHost, ClientStatistics clientStatistics, boolean secure) {
 
         this.http2Channel = http2Channel;
         this.defaultHost = defaultHost;
         this.clientStatistics = clientStatistics;
+        this.secure = secure;
         http2Channel.getReceiveSetter().set(new Http2ReceiveListener());
         http2Channel.resumeReceives();
         http2Channel.addCloseTask(new ChannelListener<Http2Channel>() {
@@ -116,10 +127,13 @@ public class Http2ClientConnection implements ClientConnection {
     }
 
     @Override
-    public void sendRequest(ClientRequest request, ClientCallback<ClientExchange> clientCallback) {
-        request.getRequestHeaders().put(PATH, request.getPath());
-        request.getRequestHeaders().put(SCHEME, "https");
+    public synchronized void sendRequest(ClientRequest request, ClientCallback<ClientExchange> clientCallback) {
         request.getRequestHeaders().put(METHOD, request.getMethod().toString());
+        boolean connectRequest = request.getMethod().equals(Methods.CONNECT);
+        if(!connectRequest) {
+            request.getRequestHeaders().put(PATH, request.getPath());
+            request.getRequestHeaders().put(SCHEME, secure ? "https" : "http");
+        }
         final String host = request.getRequestHeaders().getFirst(Headers.HOST);
         if(host != null) {
             request.getRequestHeaders().put(AUTHORITY, host);
@@ -141,7 +155,7 @@ public class Http2ClientConnection implements ClientConnection {
                 handleError(new IOException(e));
                 return;
             }
-        } else if (transferEncodingString == null) {
+        } else if (transferEncodingString == null && !connectRequest) {
             hasContent = false;
         }
 
@@ -162,7 +176,7 @@ public class Http2ClientConnection implements ClientConnection {
         }
         String hn = request.getAttachment(ProxiedRequestAttachments.SERVER_NAME);
         if(hn != null) {
-            request.getRequestHeaders().put(Headers.X_FORWARDED_HOST, hn);
+            request.getRequestHeaders().put(Headers.X_FORWARDED_HOST, NetworkUtils.formatPossibleIpv6Address(hn));
         }
         Integer port = request.getAttachment(ProxiedRequestAttachments.SERVER_PORT);
         if(port != null) {
@@ -290,7 +304,14 @@ public class Http2ClientConnection implements ClientConnection {
 
     @Override
     public void close() throws IOException {
-        http2Channel.sendGoAway(0);
+        try {
+            http2Channel.sendGoAway(0);
+        } finally {
+            for(Map.Entry<Integer, Http2ClientExchange> entry : currentExchanges.entrySet()) {
+                entry.getValue().failed(new ClosedChannelException());
+            }
+            currentExchanges.clear();
+        }
     }
 
     @Override
@@ -331,6 +352,11 @@ public class Http2ClientConnection implements ClientConnection {
     @Override
     public boolean isUpgradeSupported() {
         return false;
+    }
+
+    @Override
+    public void addCloseListener(ChannelListener<ClientConnection> listener) {
+        closeListeners.add(listener);
     }
 
     private class Http2ReceiveListener implements ChannelListener<Http2Channel> {
@@ -415,6 +441,9 @@ public class Http2ClientConnection implements ClientConnection {
                         }
                     }
                     Channels.drain(result, Long.MAX_VALUE);
+
+                } else if (result instanceof Http2GoAwayStreamSourceChannel) {
+                    close();
                 } else if(!channel.isOpen()) {
                     throw UndertowMessages.MESSAGES.channelIsClosed();
                 } else if(result != null) {

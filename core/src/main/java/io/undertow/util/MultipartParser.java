@@ -74,19 +74,19 @@ public class MultipartParser {
     public static class ParseState {
         private final ByteBufferPool bufferPool;
         private final PartHandler partHandler;
-        private final String requestCharset;
+        private String requestCharset;
         /**
          * The boundary, complete with the initial CRLF--
          */
         private final byte[] boundary;
 
         //0=preamble
-        private volatile int state = 0;
-        private volatile int subState = Integer.MAX_VALUE; // used for preamble parsing
-        private volatile ByteArrayOutputStream currentString = null;
-        private volatile String currentHeaderName = null;
-        private volatile HeaderMap headers;
-        private volatile Encoding encodingHandler;
+        private int state = 0;
+        private int subState = Integer.MAX_VALUE; // used for preamble parsing
+        private ByteArrayOutputStream currentString = null;
+        private String currentHeaderName = null;
+        private HeaderMap headers;
+        private Encoding encodingHandler;
 
 
         public ParseState(final ByteBufferPool bufferPool, final PartHandler partHandler, String requestCharset, final byte[] boundary) {
@@ -94,6 +94,10 @@ public class MultipartParser {
             this.partHandler = partHandler;
             this.requestCharset = requestCharset;
             this.boundary = boundary;
+        }
+
+        public void setCharacterEncoding(String encoding) {
+            requestCharset = encoding;
         }
 
         public void parse(ByteBuffer buffer) throws IOException {

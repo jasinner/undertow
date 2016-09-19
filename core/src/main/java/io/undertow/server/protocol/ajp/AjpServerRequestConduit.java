@@ -18,8 +18,12 @@
 
 package io.undertow.server.protocol.ajp;
 
+import static org.xnio.Bits.anyAreSet;
+import static org.xnio.Bits.longBitMask;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.util.concurrent.TimeUnit;
 
@@ -31,9 +35,6 @@ import org.xnio.channels.StreamSinkChannel;
 import org.xnio.conduits.AbstractStreamSourceConduit;
 import org.xnio.conduits.ConduitReadableByteChannel;
 import org.xnio.conduits.StreamSourceConduit;
-
-import static org.xnio.Bits.anyAreSet;
-import static org.xnio.Bits.longBitMask;
 
 /**
  * Underlying AJP request channel.
@@ -224,7 +225,7 @@ public class AjpServerRequestConduit extends AbstractStreamSourceConduit<StreamS
                 if (finishListener != null) {
                     finishListener.handleEvent(this);
                 }
-                return read;
+                throw new ClosedChannelException();
             } else if (headerBuffer.hasRemaining()) {
                 return 0;
             } else {
@@ -232,7 +233,7 @@ public class AjpServerRequestConduit extends AbstractStreamSourceConduit<StreamS
                 byte b1 = headerBuffer.get(); //0x12
                 byte b2 = headerBuffer.get(); //0x34
                 if (b1 != 0x12 || b2 != 0x34) {
-                    throw UndertowMessages.MESSAGES.wrongMagicNumber(b1 << 8 | b2);
+                    throw UndertowMessages.MESSAGES.wrongMagicNumber((b1 & 0xFF) << 8 | (b2 & 0xFF));
                 }
                 headerBuffer.get();//the length headers, two more than the string length header
                 headerBuffer.get();

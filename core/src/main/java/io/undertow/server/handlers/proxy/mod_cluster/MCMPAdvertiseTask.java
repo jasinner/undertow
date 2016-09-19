@@ -18,6 +18,12 @@
 
 package io.undertow.server.handlers.proxy.mod_cluster;
 
+import io.undertow.UndertowLogger;
+import io.undertow.util.NetworkUtils;
+import org.xnio.OptionMap;
+import org.xnio.XnioWorker;
+import org.xnio.channels.MulticastMessageChannel;
+
 import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -30,11 +36,6 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
-
-import io.undertow.UndertowLogger;
-import org.xnio.OptionMap;
-import org.xnio.XnioWorker;
-import org.xnio.channels.MulticastMessageChannel;
 
 /**
  * @author Emanuel Muckenhuber
@@ -87,6 +88,8 @@ class MCMPAdvertiseTask implements Runnable {
             }
         }
         final MCMPAdvertiseTask task = new MCMPAdvertiseTask(container, config, channel);
+        //execute immediately, so there is no delay before load balancing starts working
+        channel.getIoThread().execute(task);
         channel.getIoThread().executeAtInterval(task, config.getAdvertiseFrequency(), TimeUnit.MILLISECONDS);
     }
 
@@ -94,8 +97,11 @@ class MCMPAdvertiseTask implements Runnable {
 
         this.container = container;
         this.protocol = config.getProtocol();
-        this.host = config.getManagementHost();
-        this.port = config.getManagementPort();
+        // MODCLUSTER-483 mod_cluster client does not yet support ipv6 addresses with zone indices so skip it
+        String host = config.getManagementSocketAddress().getHostString();
+        int zoneIndex = host.indexOf("%");
+        this.host = (zoneIndex < 0) ? host : host.substring(0, zoneIndex);
+        this.port = config.getManagementSocketAddress().getPort();
         this.path = config.getPath();
         this.channel = channel;
 
@@ -166,7 +172,7 @@ class MCMPAdvertiseTask implements Runnable {
                     .append("Sequence: ").append(seq).append(CRLF)
                     .append("Digest: ").append(digestString).append(CRLF)
                     .append("Server: ").append(server).append(CRLF)
-                    .append("X-Manager-Address: ").append(host).append(":").append(port).append(CRLF)
+                    .append("X-Manager-Address: ").append(NetworkUtils.formatPossibleIpv6Address(host)).append(":").append(port).append(CRLF)
                     .append("X-Manager-Url: ").append(path).append(CRLF)
                     .append("X-Manager-Protocol: ").append(protocol).append(CRLF)
                     .append("X-Manager-Host: ").append(host).append(CRLF);
@@ -181,7 +187,7 @@ class MCMPAdvertiseTask implements Runnable {
     }
 
     private void digestString(MessageDigest md, String securityKey) {
-        byte[] buf = securityKey.getBytes();
+        byte[] buf = securityKey.getBytes(StandardCharsets.UTF_8);
         md.update(buf);
     }
 

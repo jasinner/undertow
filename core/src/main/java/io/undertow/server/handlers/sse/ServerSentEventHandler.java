@@ -18,15 +18,19 @@
 
 package io.undertow.server.handlers.sse;
 
+import io.undertow.UndertowLogger;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.util.Headers;
 import io.undertow.util.HttpString;
 import io.undertow.util.PathTemplateMatch;
+import org.xnio.ChannelExceptionHandler;
 import org.xnio.ChannelListener;
 import org.xnio.ChannelListeners;
+import org.xnio.IoUtils;
 import org.xnio.channels.StreamSinkChannel;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
@@ -62,10 +66,15 @@ public class ServerSentEventHandler implements HttpHandler {
                 public void handleEvent(StreamSinkChannel channel) {
                     handleConnect(channel, exchange);
                 }
-            }, null));
+            }, new ChannelExceptionHandler<StreamSinkChannel>() {
+                @Override
+                public void handleException(StreamSinkChannel channel, IOException exception) {
+                    IoUtils.safeClose(exchange.getConnection());
+                }
+            }));
             sink.resumeWrites();
         } else {
-            exchange.dispatch(new Runnable() {
+            exchange.dispatch(exchange.getIoThread(), new Runnable() {
                 @Override
                 public void run() {
                     handleConnect(sink, exchange);
@@ -75,6 +84,7 @@ public class ServerSentEventHandler implements HttpHandler {
     }
 
     private void handleConnect(StreamSinkChannel channel, HttpServerExchange exchange) {
+        UndertowLogger.REQUEST_LOGGER.debugf("Opened SSE connection to %s", exchange);
         final ServerSentEventConnection connection = new ServerSentEventConnection(exchange, channel);
         PathTemplateMatch pt = exchange.getAttachment(PathTemplateMatch.ATTACHMENT_KEY);
         if(pt != null) {

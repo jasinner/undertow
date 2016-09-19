@@ -198,8 +198,8 @@ public class SecurityPathMatches {
                     setupPathSecurityInformation(defaultPathSecurityInformation, securityInformation, webResources);
                 }
                 for (String pattern : webResources.getUrlPatterns()) {
-                    if (pattern.endsWith("/*") || pattern.endsWith("/")) {
-                        String part = pattern.substring(0, pattern.lastIndexOf('/'));
+                    if (pattern.endsWith("/*")) {
+                        String part = pattern.substring(0, pattern.length() - 2);
                         PathSecurityInformation info = prefixPathRoleInformation.get(part);
                         if (info == null) {
                             prefixPathRoleInformation.put(part, info = new PathSecurityInformation());
@@ -267,7 +267,7 @@ public class SecurityPathMatches {
         final Set<String> methods;
         final SecurityInformation securityInformation;
 
-        public ExcludedMethodRoles(final Set<String> methods, final SecurityInformation securityInformation) {
+        ExcludedMethodRoles(final Set<String> methods, final SecurityInformation securityInformation) {
             this.methods = methods;
             this.securityInformation = securityInformation;
         }

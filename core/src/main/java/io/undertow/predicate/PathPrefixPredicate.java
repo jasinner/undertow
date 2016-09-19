@@ -33,7 +33,7 @@ class PathPrefixPredicate implements Predicate {
 
     private final PathMatcher<Boolean> pathMatcher;
 
-    public PathPrefixPredicate(final String... paths) {
+    PathPrefixPredicate(final String... paths) {
         PathMatcher<Boolean> matcher = new PathMatcher<>();
         for(String path : paths) {
             if(!path.startsWith("/")) {
@@ -50,7 +50,7 @@ class PathPrefixPredicate implements Predicate {
         final String relativePath = value.getRelativePath();
         PathMatcher.PathMatch<Boolean> result = pathMatcher.match(relativePath);
 
-        boolean matches = result.getValue() == Boolean.TRUE;
+        boolean matches = Boolean.TRUE.equals(result.getValue());
         if(matches) {
             Map<String, Object> context = value.getAttachment(PREDICATE_CONTEXT);
             if(context == null) {

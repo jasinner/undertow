@@ -21,11 +21,11 @@ package io.undertow.websockets.jsr;
 import io.undertow.servlet.ServletExtension;
 import io.undertow.servlet.Servlets;
 import io.undertow.servlet.api.DeploymentInfo;
-import io.undertow.servlet.api.ThreadSetupAction;
-import io.undertow.servlet.core.CompositeThreadSetupAction;
+import io.undertow.servlet.api.ThreadSetupHandler;
 import io.undertow.servlet.core.ContextClassLoaderSetupAction;
 import io.undertow.servlet.spec.ServletContextImpl;
 import io.undertow.connector.ByteBufferPool;
+import io.undertow.websockets.extensions.ExtensionHandshake;
 import org.xnio.XnioWorker;
 
 import javax.servlet.DispatcherType;
@@ -33,12 +33,13 @@ import javax.servlet.FilterRegistration;
 import javax.servlet.ServletContext;
 import javax.servlet.ServletContextEvent;
 import javax.servlet.ServletContextListener;
-import javax.websocket.ContainerProvider;
 import javax.websocket.DeploymentException;
+import javax.websocket.Extension;
 import javax.websocket.server.ServerContainer;
 import javax.websocket.server.ServerEndpointConfig;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 
@@ -58,26 +59,36 @@ public class Bootstrap implements ServletExtension {
         }
         XnioWorker worker = info.getWorker();
         if(worker == null) {
+            ServerWebSocketContainer defaultContainer = UndertowContainerProvider.getDefaultContainer();
+            if(defaultContainer == null) {
+                throw JsrWebSocketLogger.ROOT_LOGGER.xnioWorkerWasNullAndNoDefault();
+            }
             JsrWebSocketLogger.ROOT_LOGGER.xnioWorkerWasNull();
-            worker = ((ServerWebSocketContainer)ContainerProvider.getWebSocketContainer()).getXnioWorker();
+            worker = defaultContainer.getXnioWorker();
         }
         ByteBufferPool buffers = info.getBuffers();
         if(buffers == null) {
+            ServerWebSocketContainer defaultContainer = UndertowContainerProvider.getDefaultContainer();
+            if(defaultContainer == null) {
+                throw JsrWebSocketLogger.ROOT_LOGGER.bufferPoolWasNullAndNoDefault();
+            }
             JsrWebSocketLogger.ROOT_LOGGER.bufferPoolWasNull();
-            buffers = ((ServerWebSocketContainer)ContainerProvider.getWebSocketContainer()).getBufferPool();
+            buffers = defaultContainer.getBufferPool();
         }
 
-        final List<ThreadSetupAction> setup = new ArrayList<>();
+        final List<ThreadSetupHandler> setup = new ArrayList<>();
         setup.add(new ContextClassLoaderSetupAction(deploymentInfo.getClassLoader()));
         setup.addAll(deploymentInfo.getThreadSetupActions());
-        final CompositeThreadSetupAction threadSetupAction = new CompositeThreadSetupAction(setup);
 
         InetSocketAddress bind = null;
         if(info.getClientBindAddress() != null) {
             bind = new InetSocketAddress(info.getClientBindAddress(), 0);
         }
-
-        ServerWebSocketContainer container = new ServerWebSocketContainer(deploymentInfo.getClassIntrospecter(), servletContext.getClassLoader(), worker, buffers, threadSetupAction, info.isDispatchToWorkerThread(), bind, info.getReconnectHandler());
+        List<Extension> extensions = new ArrayList<>();
+        for(ExtensionHandshake e: info.getExtensions()) {
+            extensions.add(new ExtensionImpl(e.getName(), Collections.emptyList()));
+        }
+        ServerWebSocketContainer container = new ServerWebSocketContainer(deploymentInfo.getClassIntrospecter(), servletContext.getClassLoader(), worker, buffers, setup, info.isDispatchToWorkerThread(), bind, info.getReconnectHandler(), extensions);
         try {
             for (Class<?> annotation : info.getAnnotatedEndpoints()) {
                 container.addEndpoint(annotation);

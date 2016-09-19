@@ -18,7 +18,54 @@
 
 package io.undertow.testutils;
 
+import static io.undertow.server.handlers.ResponseCodeHandler.HANDLE_404;
+import static org.xnio.Options.SSL_CLIENT_AUTH_MODE;
+import static org.xnio.SslClientAuthMode.REQUESTED;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.Inet4Address;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertificateException;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+
+import org.junit.Assume;
+import org.junit.Ignore;
+import org.junit.runner.Description;
+import org.junit.runner.Result;
+import org.junit.runner.notification.Failure;
+import org.junit.runner.notification.RunListener;
+import org.junit.runner.notification.RunNotifier;
+import org.junit.runners.BlockJUnit4ClassRunner;
+import org.junit.runners.model.FrameworkMethod;
+import org.junit.runners.model.InitializationError;
+import org.junit.runners.model.Statement;
+import org.wildfly.openssl.OpenSSLProvider;
+import org.xnio.ChannelListener;
+import org.xnio.ChannelListeners;
+import org.xnio.IoUtils;
+import org.xnio.OptionMap;
+import org.xnio.Options;
+import org.xnio.StreamConnection;
+import org.xnio.Xnio;
+import org.xnio.XnioWorker;
+import org.xnio.channels.AcceptingChannel;
+import org.xnio.ssl.XnioSsl;
+import io.undertow.UndertowLogger;
 import io.undertow.UndertowOptions;
+import io.undertow.connector.ByteBufferPool;
+import io.undertow.protocols.alpn.ALPNManager;
 import io.undertow.protocols.ssl.UndertowXnioSsl;
 import io.undertow.security.impl.GSSAPIAuthenticationMechanism;
 import io.undertow.server.DefaultByteBufferPool;
@@ -35,57 +82,10 @@ import io.undertow.server.protocol.http.AlpnOpenListener;
 import io.undertow.server.protocol.http.HttpOpenListener;
 import io.undertow.server.protocol.http2.Http2OpenListener;
 import io.undertow.server.protocol.http2.Http2UpgradeHandler;
-import io.undertow.server.protocol.spdy.SpdyOpenListener;
-import io.undertow.server.protocol.spdy.SpdyPlainOpenListener;
 import io.undertow.util.Headers;
 import io.undertow.util.NetworkUtils;
 import io.undertow.util.SingleByteStreamSinkConduit;
 import io.undertow.util.SingleByteStreamSourceConduit;
-
-import org.jboss.logging.Logger;
-import org.junit.Assume;
-import org.junit.Ignore;
-import org.junit.runner.Description;
-import org.junit.runner.Result;
-import org.junit.runner.notification.Failure;
-import org.junit.runner.notification.RunListener;
-import org.junit.runner.notification.RunNotifier;
-import org.junit.runners.BlockJUnit4ClassRunner;
-import org.junit.runners.model.FrameworkMethod;
-import org.junit.runners.model.InitializationError;
-import org.junit.runners.model.Statement;
-import org.xnio.ChannelListener;
-import org.xnio.ChannelListeners;
-import org.xnio.IoUtils;
-import org.xnio.OptionMap;
-import org.xnio.Options;
-import io.undertow.connector.ByteBufferPool;
-import org.xnio.StreamConnection;
-import org.xnio.Xnio;
-import org.xnio.XnioWorker;
-import org.xnio.channels.AcceptingChannel;
-import org.xnio.ssl.XnioSsl;
-
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.Inet4Address;
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.security.KeyManagementException;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.UnrecoverableKeyException;
-import java.security.cert.CertificateException;
-
-import static io.undertow.server.handlers.ResponseCodeHandler.HANDLE_404;
-import static org.xnio.Options.SSL_CLIENT_AUTH_MODE;
-import static org.xnio.SslClientAuthMode.REQUESTED;
 
 /**
  * A class that starts a server before the test suite. By swapping out the root handler
@@ -94,6 +94,18 @@ import static org.xnio.SslClientAuthMode.REQUESTED;
  * @author Stuart Douglas
  */
 public class DefaultServer extends BlockJUnit4ClassRunner {
+
+    private static final Throwable OPENSSL_FAILURE;
+
+    static {
+        Throwable failure = null;
+        try {
+            OpenSSLProvider.register();
+        } catch (Throwable t) {
+            failure = t;
+        }
+        OPENSSL_FAILURE = failure;
+    }
 
     static final String DEFAULT = "default";
     private static final int PROXY_OFFSET = 1111;
@@ -122,23 +134,18 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
     private static final char[] STORE_PASSWORD = "password".toCharArray();
 
     private static final boolean ajp = Boolean.getBoolean("test.ajp");
-    private static final boolean spdy = Boolean.getBoolean("test.spdy");
     private static final boolean h2 = Boolean.getBoolean("test.h2");
     private static final boolean h2c = Boolean.getBoolean("test.h2c");
     private static final boolean h2cUpgrade = Boolean.getBoolean("test.h2c-upgrade");
-    private static final boolean spdyPlain = Boolean.getBoolean("test.spdy-plain");
     private static final boolean https = Boolean.getBoolean("test.https");
     private static final boolean proxy = Boolean.getBoolean("test.proxy");
     private static final boolean apache = Boolean.getBoolean("test.apache");
     private static final boolean dump = Boolean.getBoolean("test.dump");
     private static final boolean single = Boolean.getBoolean("test.single");
+    private static final boolean openssl = Boolean.getBoolean("test.openssl");
     private static final int runs = Integer.getInteger("test.runs", 1);
 
     private static final DelegatingHandler rootHandler = new DelegatingHandler();
-
-    private static final Logger log = Logger.getLogger(DefaultServer.class);
-
-
 
     private static final DebuggingSlicePool pool = new DebuggingSlicePool(new DefaultByteBufferPool(true, BUFFER_SIZE, 1000, 10, 100));
 
@@ -156,7 +163,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
         }
     }
 
-    private static SSLContext createSSLContext(final KeyStore keyStore, final KeyStore trustStore) throws IOException {
+    private static SSLContext createSSLContext(final KeyStore keyStore, final KeyStore trustStore, boolean client) throws IOException {
         KeyManager[] keyManagers;
         try {
             KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
@@ -177,7 +184,11 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
         SSLContext sslContext;
         try {
-            sslContext = SSLContext.getInstance("TLS");
+            if(openssl && !client) {
+                sslContext = SSLContext.getInstance("openssl.TLS");
+            } else {
+                sslContext = SSLContext.getInstance("TLS");
+            }
             sslContext.init(keyManagers, trustManagers, null);
         } catch (NoSuchAlgorithmException | KeyManagementException e) {
             throw new IOException("Unable to create and initialise the SSLContext", e);
@@ -235,18 +246,18 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
             @Override
             public void testFinished(Description description) throws Exception {
 
-                if(!DebuggingSlicePool.BUFFERS.isEmpty()) {
+                if (!DebuggingSlicePool.BUFFERS.isEmpty()) {
                     try {
                         Thread.sleep(200);
-                        if(!DebuggingSlicePool.BUFFERS.isEmpty()) {
+                        if (!DebuggingSlicePool.BUFFERS.isEmpty()) {
                             Thread.sleep(2000);
                         }
                     } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
-                    for(DebuggingSlicePool.DebuggingBuffer b : DebuggingSlicePool.BUFFERS) {
+                    for (DebuggingSlicePool.DebuggingBuffer b : DebuggingSlicePool.BUFFERS) {
                         b.getAllocationPoint().printStackTrace();
-                        notifier.fireTestFailure(new Failure(description,  new RuntimeException("Buffer Leak " + b.getLabel(), b.getAllocationPoint())));
+                        notifier.fireTestFailure(new Failure(description, new RuntimeException("Buffer Leak " + b.getLabel(), b.getAllocationPoint())));
                     }
                     DebuggingSlicePool.BUFFERS.clear();
                 }
@@ -258,6 +269,9 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
     }
 
     private static void runInternal(final RunNotifier notifier) {
+        if(openssl && OPENSSL_FAILURE != null) {
+            throw new RuntimeException(OPENSSL_FAILURE);
+        }
         if (first) {
             first = false;
             xnio = Xnio.getInstance("nio", DefaultServer.class.getClassLoader());
@@ -279,7 +293,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
                         .set(Options.BALANCING_TOKENS, 1)
                         .set(Options.BALANCING_CONNECTIONS, 2)
                         .getMap();
-                final SSLContext serverContext = createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE));
+                final SSLContext serverContext = createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE), false);
                 UndertowXnioSsl ssl = new UndertowXnioSsl(worker.getXnio(), OptionMap.EMPTY, SSL_BUFFER_POOL, serverContext);
                 if (ajp) {
                     openListener = new AjpOpenListener(pool);
@@ -297,30 +311,11 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
                         proxyServer.resumeAccepts();
 
                     }
-                } else if (spdy && isAlpnEnabled()) {
-                    openListener = new SpdyOpenListener(pool, new DebuggingSlicePool(new DefaultByteBufferPool(false, 8192)), OptionMap.create(UndertowOptions.ENABLE_SPDY, true));
-                    acceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(new AlpnOpenListener(pool).addProtocol(SpdyOpenListener.SPDY_3_1, (io.undertow.server.DelegateOpenListener) openListener, 5)));
-
-                    SSLContext clientContext = createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE));
-
-                    server = ssl.createSslConnectionServer(worker, new InetSocketAddress(getHostAddress("default"), 7777 + PROXY_OFFSET), acceptListener, serverOptions);
-                    server.getAcceptSetter().set(acceptListener);
-                    server.resumeAccepts();
-
-                    proxyOpenListener = new HttpOpenListener(pool, OptionMap.create(UndertowOptions.BUFFER_PIPELINED_DATA, true));
-                    proxyAcceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(proxyOpenListener));
-                    proxyServer = worker.createStreamConnectionServer(new InetSocketAddress(Inet4Address.getByName(getHostAddress(DEFAULT)), getHostPort(DEFAULT)), proxyAcceptListener, serverOptions);
-                    ProxyHandler proxyHandler = new ProxyHandler(new LoadBalancingProxyClient(GSSAPIAuthenticationMechanism.EXCLUSIVITY_CHECKER).addHost(new URI("spdy", null, getHostAddress(DEFAULT), getHostPort(DEFAULT) + PROXY_OFFSET, "/", null, null), null, new UndertowXnioSsl(xnio, OptionMap.EMPTY, SSL_BUFFER_POOL, clientContext), OptionMap.create(UndertowOptions.ENABLE_SPDY, true)), 120000, HANDLE_404);
-                    setupProxyHandlerForSSL(proxyHandler);
-                    proxyOpenListener.setRootHandler(proxyHandler);
-                    proxyServer.resumeAccepts();
-
-
                 } else if (h2 && isAlpnEnabled()) {
-                    openListener = new Http2OpenListener(pool, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true, UndertowOptions.HTTP2_SETTINGS_ENABLE_PUSH, false));
+                    openListener = new Http2OpenListener(pool, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true, UndertowOptions.HTTP2_PADDING_SIZE, 10));
                     acceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(new AlpnOpenListener(pool).addProtocol(Http2OpenListener.HTTP2, (io.undertow.server.DelegateOpenListener) openListener, 10)));
 
-                    SSLContext clientContext = createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE));
+                    SSLContext clientContext = createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE), true);
                     server = ssl.createSslConnectionServer(worker, new InetSocketAddress(getHostAddress("default"), 7777 + PROXY_OFFSET), acceptListener, serverOptions);
                     server.resumeAccepts();
 
@@ -334,7 +329,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
 
                 } else if (h2c || h2cUpgrade) {
-                    openListener = new HttpOpenListener(pool, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true, UndertowOptions.HTTP2_SETTINGS_ENABLE_PUSH, false));
+                    openListener = new HttpOpenListener(pool, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true, UndertowOptions.HTTP2_PADDING_SIZE, 10));
                     acceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(openListener));
 
                     InetSocketAddress targetAddress = new InetSocketAddress(Inet4Address.getByName(getHostAddress(DEFAULT)), getHostPort(DEFAULT) + PROXY_OFFSET);
@@ -347,22 +342,6 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
                     setupProxyHandlerForSSL(proxyHandler);
                     proxyOpenListener.setRootHandler(proxyHandler);
                     proxyServer.resumeAccepts();
-
-                } else if (spdyPlain) {
-                    openListener = new SpdyPlainOpenListener(pool, new DebuggingSlicePool(new DefaultByteBufferPool(false, 8192)), OptionMap.create(UndertowOptions.ENABLE_SPDY, true));
-                    acceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(openListener));
-
-                    server = worker.createStreamConnectionServer(new InetSocketAddress(getHostAddress("default"), 7777 + PROXY_OFFSET), acceptListener, OptionMap.EMPTY);
-                    server.resumeAccepts();
-
-                    proxyOpenListener = new HttpOpenListener(pool, OptionMap.create(UndertowOptions.BUFFER_PIPELINED_DATA, true));
-                    proxyAcceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(proxyOpenListener));
-                    proxyServer = worker.createStreamConnectionServer(new InetSocketAddress(Inet4Address.getByName(getHostAddress(DEFAULT)), getHostPort(DEFAULT)), proxyAcceptListener, serverOptions);
-                    ProxyHandler proxyHandler = new ProxyHandler(new LoadBalancingProxyClient(GSSAPIAuthenticationMechanism.EXCLUSIVITY_CHECKER).addHost(new URI("spdy-plain", null, getHostAddress(DEFAULT), getHostPort(DEFAULT) + PROXY_OFFSET, "/", null, null), null, null, OptionMap.create(UndertowOptions.ENABLE_SPDY, true)), 120000, HANDLE_404);
-                    setupProxyHandlerForSSL(proxyHandler);
-                    proxyOpenListener.setRootHandler(proxyHandler);
-                    proxyServer.resumeAccepts();
-
 
                 } else if (https) {
 
@@ -383,11 +362,8 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
 
                 } else {
-                    if(h2) {
-                        log.error("HTTP2 selected but Netty ALPN was not on the boot class path");
-                    }
-                    if(spdy) {
-                        log.error("SPDY selected but Netty ALPN was not on the boot class path");
+                    if (h2) {
+                        UndertowLogger.ROOT_LOGGER.error("HTTP2 selected but Netty ALPN was not on the boot class path");
                     }
                     openListener = new HttpOpenListener(pool, OptionMap.create(UndertowOptions.BUFFER_PIPELINED_DATA, true, UndertowOptions.ENABLE_CONNECTOR_STATISTICS, true));
                     acceptListener = ChannelListeners.openListenerAdapter(wrapOpenListener(openListener));
@@ -407,7 +383,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
                     }
 
                 }
-                if(h2cUpgrade) {
+                if (h2cUpgrade) {
                     openListener.setRootHandler(new Http2UpgradeHandler(rootHandler));
                 } else {
                     openListener.setRootHandler(rootHandler);
@@ -476,23 +452,26 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
                 return;
             }
         }
-        if(spdy || spdyPlain || h2 || h2c || ajp) {
+        if(h2 || h2c || ajp || h2cUpgrade) {
             //h2c-upgrade we still allow HTTP1
             HttpOneOnly httpOneOnly = method.getAnnotation(HttpOneOnly.class);
-            if(httpOneOnly == null) {
+            if (httpOneOnly == null) {
                 httpOneOnly = method.getMethod().getDeclaringClass().getAnnotation(HttpOneOnly.class);
             }
-            if(httpOneOnly != null) {
+            if (httpOneOnly != null) {
                 notifier.fireTestIgnored(describeChild(method));
                 return;
             }
+            if (h2) {
+                assumeAlpnEnabled();
+            }
         }
-        if(https) {
+        if (https) {
             HttpsIgnore httpsIgnore = method.getAnnotation(HttpsIgnore.class);
-            if(httpsIgnore == null) {
+            if (httpsIgnore == null) {
                 httpsIgnore = method.getMethod().getDeclaringClass().getAnnotation(HttpsIgnore.class);
             }
-            if(httpsIgnore != null) {
+            if (httpsIgnore != null) {
                 notifier.fireTestIgnored(describeChild(method));
                 return;
             }
@@ -532,22 +511,16 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
             if (ajp) {
                 sb.append("{ajp}");
             }
-            if(spdy) {
-                sb.append("{spdy}");
-            }
-            if(spdyPlain) {
-                sb.append("{spdy-plain}");
-            }
-            if(https) {
+            if (https) {
                 sb.append("{https}");
             }
-            if(h2) {
+            if (h2) {
                 sb.append("{http2}");
             }
-            if(h2c) {
+            if (h2c) {
                 sb.append("{http2-clear}");
             }
-            if(h2cUpgrade) {
+            if (h2cUpgrade) {
                 sb.append("{http2-clear-upgrade}");
             }
             return sb.toString();
@@ -604,7 +577,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
     public static SSLContext createClientSslContext() {
         try {
-            return createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE));
+            return createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE), true);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -612,7 +585,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
     public static SSLContext getServerSslContext() {
         try {
-            return createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE));
+            return createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE), false);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -637,8 +610,8 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
      * single client. Client cert mode is not set by default
      */
     public static void startSSLServer(OptionMap optionMap, ChannelListener openListener) throws IOException {
-        SSLContext serverContext = createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE));
-        clientSslContext = createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE));
+        SSLContext serverContext = createSSLContext(loadKeyStore(SERVER_KEY_STORE), loadKeyStore(SERVER_TRUST_STORE), false);
+        clientSslContext = createSSLContext(loadKeyStore(CLIENT_KEY_STORE), loadKeyStore(CLIENT_TRUST_STORE), true);
         startSSLServer(serverContext, optionMap, openListener);
     }
 
@@ -706,11 +679,19 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
         return System.getProperty(serverName + ".server.address", "localhost");
     }
 
+    public static String getHostAddress() {
+        return getHostAddress(DEFAULT);
+    }
+
     public static int getHostPort(String serverName) {
         if (isApacheTest()) {
             return APACHE_PORT;
         }
         return Integer.getInteger(serverName + ".server.port", 7777);
+    }
+
+    public static int getHostPort() {
+        return getHostPort(DEFAULT);
     }
 
     public static int getHostSSLPort(String serverName) {
@@ -726,7 +707,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
 
     public static void setUndertowOptions(final OptionMap options) {
         OptionMap.Builder builder = OptionMap.builder().addAll(options);
-        if(h2c) {
+        if (h2c) {
             builder.set(UndertowOptions.ENABLE_HTTP2, true);
         }
         openListener.setUndertowOptions(builder.getMap());
@@ -754,11 +735,7 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
     }
 
     public static boolean isProxy() {
-        return proxy || spdy || https || h2 || h2c|| spdyPlain || ajp || h2cUpgrade;
-    }
-
-    public static boolean isSpdy() {
-        return spdy || spdyPlain;
+        return proxy || https || h2 || h2c || ajp || h2cUpgrade;
     }
 
     public static boolean isHttps() {
@@ -785,8 +762,14 @@ public class DefaultServer extends BlockJUnit4ClassRunner {
         }
     }
 
+    private static Boolean alpnEnabled;
+
     private static boolean isAlpnEnabled() {
-        return !System.getProperty("alpn-boot-string", "").isEmpty();
+        if (alpnEnabled == null) {
+            SSLEngine engine = getServerSslContext().createSSLEngine();
+            alpnEnabled = ALPNManager.INSTANCE.getProvider(engine) != null;
+        }
+        return alpnEnabled;
     }
 
     public static void assumeAlpnEnabled() {

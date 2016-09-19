@@ -31,7 +31,7 @@ class Http2SettingsParser extends Http2PushBackParser {
 
     private final List<Http2Setting> settings = new ArrayList<>();
 
-    public Http2SettingsParser(int frameLength) {
+    Http2SettingsParser(int frameLength) {
         super(frameLength);
     }
 
@@ -43,10 +43,10 @@ class Http2SettingsParser extends Http2PushBackParser {
             }
             int id = (resource.get() & 0xFF) << 8;
             id += (resource.get() & 0xFF);
-            int value = (resource.get() & 0xFF) << 24;
-            value += (resource.get() & 0xFF) << 16;
-            value += (resource.get() & 0xFF) << 8;
-            value += (resource.get() & 0xFF);
+            long value = (resource.get() & 0xFFL) << 24;
+            value += (resource.get() & 0xFFL) << 16;
+            value += (resource.get() & 0xFFL) << 8;
+            value += (resource.get() & 0xFFL);
             settings.add(new Http2Setting(id, value));
             count += 6;
         }

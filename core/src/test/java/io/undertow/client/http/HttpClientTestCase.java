@@ -139,13 +139,14 @@ public class HttpClientTestCase {
                 public void run() {
                     for (int i = 0; i < 10; i++) {
                         final ClientRequest request = new ClientRequest().setMethod(Methods.GET).setPath("/");
+                        request.getRequestHeaders().put(Headers.HOST, DefaultServer.getHostAddress());
                         connection.sendRequest(request, createClientCallback(responses, latch));
                     }
                 }
 
             });
 
-            latch.await(10, TimeUnit.MINUTES);
+            latch.await(10, TimeUnit.SECONDS);
 
             Assert.assertEquals(10, responses.size());
             for (final ClientResponse response : responses) {
@@ -176,20 +177,26 @@ public class HttpClientTestCase {
                 public void run() {
                     for (int i = 0; i < 10; i++) {
                         final ClientRequest request = new ClientRequest().setMethod(Methods.GET).setPath("/");
+                        request.getRequestHeaders().put(Headers.HOST, DefaultServer.getHostAddress());
                         connection.sendRequest(request, createClientCallback(responses, latch));
                     }
                 }
 
             });
 
-            latch.await(10, TimeUnit.MINUTES);
+            latch.await(10, TimeUnit.SECONDS);
 
             Assert.assertEquals(10, responses.size());
             for (final ClientResponse response : responses) {
                 Assert.assertEquals(message, response.getAttachment(RESPONSE_BODY));
             }
         } finally {
-            IoUtils.safeClose(connection);
+            connection.getIoThread().execute(new Runnable() {
+                @Override
+                public void run() {
+                    IoUtils.safeClose(connection);
+                }
+            });
             DefaultServer.stopSSLServer();
         }
     }
@@ -205,6 +212,7 @@ public class HttpClientTestCase {
         final ClientConnection connection = client.connect(ADDRESS, worker, DefaultServer.getBufferPool(), OptionMap.EMPTY).get();
         try {
             ClientRequest request = new ClientRequest().setPath("/1324").setMethod(Methods.GET);
+            request.getRequestHeaders().put(Headers.HOST, DefaultServer.getHostAddress());
             final List<ClientResponse> responses = new CopyOnWriteArrayList<>();
             request.getRequestHeaders().add(Headers.CONNECTION, Headers.CLOSE.toString());
             connection.sendRequest(request, createClientCallback(responses, latch));

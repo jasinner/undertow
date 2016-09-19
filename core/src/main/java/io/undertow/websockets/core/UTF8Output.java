@@ -18,15 +18,16 @@
 
 package io.undertow.websockets.core;
 
-import java.nio.ByteBuffer;
-
 import org.xnio.Buffers;
+
+import java.nio.ByteBuffer;
 
 /**
  * Utility class which allows to extract a UTF8 String from bytes respecting valid code-points
  */
 public final class UTF8Output {
     private static final int UTF8_ACCEPT = 0;
+    private static final byte HIGH_BIT = (byte) (1 << 7);
 
     private static final byte[] TYPES = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -70,6 +71,10 @@ public final class UTF8Output {
     }
 
     private void write(byte b) {
+        if(state == UTF8_ACCEPT && (b & HIGH_BIT) == 0) {
+            stringBuilder.append((char)b);
+            return;
+        }
         byte type = TYPES[b & 0xFF];
 
         codep = state != UTF8_ACCEPT ? b & 0x3f | codep << 6 : 0xff >> type & b;

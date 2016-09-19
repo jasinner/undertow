@@ -25,7 +25,6 @@ import io.undertow.server.HttpHandler;
 import io.undertow.server.HttpServerExchange;
 import io.undertow.server.handlers.ResponseCodeHandler;
 import io.undertow.server.protocol.http2.Http2ServerConnection;
-import io.undertow.server.session.SessionCookieConfig;
 import io.undertow.testutils.DefaultServer;
 import io.undertow.testutils.HttpClientUtils;
 import io.undertow.testutils.TestHttpClient;
@@ -56,7 +55,6 @@ public class LoadBalancingProxyHTTP2TestCase extends AbstractLoadBalancingProxyT
 
     @BeforeClass
     public static void setup() throws URISyntaxException {
-        final SessionCookieConfig sessionConfig = new SessionCookieConfig();
         int port = DefaultServer.getHostPort("default");
         final HttpHandler handler1 = getRootHandler("s1", "server1");
         server1 = Undertow.builder()
@@ -99,10 +97,10 @@ public class LoadBalancingProxyHTTP2TestCase extends AbstractLoadBalancingProxyT
         UndertowXnioSsl ssl = new UndertowXnioSsl(DefaultServer.getWorker().getXnio(), OptionMap.EMPTY, DefaultServer.SSL_BUFFER_POOL, DefaultServer.createClientSslContext());
 
         DefaultServer.setRootHandler(new ProxyHandler(new LoadBalancingProxyClient()
-                .setConnectionsPerThread(1)
+                .setConnectionsPerThread(4)
                 .addHost(new URI("https", null, DefaultServer.getHostAddress("default"), port + 1, null, null, null), "s1", ssl, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true))
                 .addHost(new URI("https", null, DefaultServer.getHostAddress("default"), port + 2, null, null, null), "s2", ssl, OptionMap.create(UndertowOptions.ENABLE_HTTP2, true))
-                , 10000, ResponseCodeHandler.HANDLE_404));
+                , 10000, ResponseCodeHandler.HANDLE_404, false, false , 2));
     }
 
 

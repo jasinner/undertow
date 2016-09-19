@@ -18,6 +18,18 @@
 
 package io.undertow.server.protocol.http;
 
+import java.io.IOException;
+import java.nio.channels.Channel;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import org.xnio.ChannelExceptionHandler;
+import org.xnio.ChannelListener;
+import org.xnio.ChannelListeners;
+import org.xnio.channels.StreamSinkChannel;
 import io.undertow.UndertowMessages;
 import io.undertow.io.IoCallback;
 import io.undertow.server.HttpHandler;
@@ -25,16 +37,9 @@ import io.undertow.server.HttpServerExchange;
 import io.undertow.util.AttachmentKey;
 import io.undertow.util.HeaderMap;
 import io.undertow.util.Headers;
+import io.undertow.util.HttpString;
+import io.undertow.util.Protocols;
 import io.undertow.util.StatusCodes;
-import org.xnio.ChannelExceptionHandler;
-import org.xnio.ChannelListener;
-import org.xnio.ChannelListeners;
-import org.xnio.channels.StreamSinkChannel;
-
-import java.io.IOException;
-import java.nio.channels.Channel;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Class that provides support for dealing with HTTP 100 (Continue) responses.
@@ -45,6 +50,15 @@ import java.util.concurrent.TimeUnit;
  * @author Stuart Douglas
  */
 public class HttpContinue {
+
+    private static final Set<HttpString> COMPATIBLE_PROTOCOLS;
+
+    static {
+        Set<HttpString> compat = new HashSet<>();
+        compat.add(Protocols.HTTP_1_1);
+        compat.add(Protocols.HTTP_2_0);
+        COMPATIBLE_PROTOCOLS = Collections.unmodifiableSet(compat);
+    }
 
     public static final String CONTINUE = "100-continue";
 
@@ -57,7 +71,7 @@ public class HttpContinue {
      * @return <code>true</code> if the server needs to send a continue response
      */
     public static boolean requiresContinueResponse(final HttpServerExchange exchange) {
-        if (!exchange.isHttp11() || exchange.isResponseStarted() || !exchange.getConnection().isContinueResponseSupported() || exchange.getAttachment(ALREADY_SENT) != null) {
+        if (!COMPATIBLE_PROTOCOLS.contains(exchange.getProtocol()) || exchange.isResponseStarted() || !exchange.getConnection().isContinueResponseSupported() || exchange.getAttachment(ALREADY_SENT) != null) {
             return false;
         }
         if (exchange.getConnection() instanceof HttpServerConnection) {
@@ -224,10 +238,11 @@ public class HttpContinue {
                                         callback.onException(exchange, null, e);
                                     }
                                 });
-                            }}));
-                            responseChannel.resumeWrites();
-                            exchange.dispatch();
-                        }else {
+                            }
+                        }));
+                responseChannel.resumeWrites();
+                exchange.dispatch();
+            } else {
                 callback.onComplete(exchange, null);
             }
         } catch (IOException e) {

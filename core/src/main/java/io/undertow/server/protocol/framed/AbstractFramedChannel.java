@@ -38,6 +38,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
+import io.undertow.UndertowLogger;
 import io.undertow.UndertowOptions;
 import org.xnio.Buffers;
 import org.xnio.ChannelExceptionHandler;
@@ -60,7 +61,6 @@ import org.xnio.channels.StreamSourceChannel;
 import io.undertow.UndertowMessages;
 import io.undertow.conduits.IdleTimeoutConduit;
 import io.undertow.util.ReferenceCountedPooled;
-import io.undertow.websockets.core.WebSocketLogger;
 import org.xnio.channels.SuspendableWriteChannel;
 
 /**
@@ -110,7 +110,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     private volatile long frameDataRemaining;
     private volatile R receiver;
 
-    private boolean receivesSuspended = true;
+    private volatile boolean receivesSuspended = true;
 
     @SuppressWarnings("unused")
     private volatile int readsBroken = 0;
@@ -121,7 +121,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     private static final AtomicIntegerFieldUpdater<AbstractFramedChannel> readsBrokenUpdater = AtomicIntegerFieldUpdater.newUpdater(AbstractFramedChannel.class, "readsBroken");
     private static final AtomicIntegerFieldUpdater<AbstractFramedChannel> writesBrokenUpdater = AtomicIntegerFieldUpdater.newUpdater(AbstractFramedChannel.class, "writesBroken");
 
-    private ReferenceCountedPooled readData = null;
+    private volatile ReferenceCountedPooled readData = null;
     private final List<ChannelListener<C>> closeTasks = new CopyOnWriteArrayList<>();
     private volatile boolean flushingSenders = false;
 
@@ -138,7 +138,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
      * If this is true then the flush() method must be called to queue writes. This is provided to support batching
      */
     private volatile boolean requireExplicitFlush = false;
-    private boolean readChannelDone = false;
+    private volatile boolean readChannelDone = false;
 
     private final ReferenceCountedPooled.FreeNotifier freeNotifier = new ReferenceCountedPooled.FreeNotifier() {
         @Override
@@ -147,6 +147,9 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
             if(!receivesSuspended && res == maxQueuedBuffers - 1) {
                 synchronized (AbstractFramedChannel.this) {
                     if(outstandingBuffersUpdater.get(AbstractFramedChannel.this) < maxQueuedBuffers) {
+                        if(UndertowLogger.REQUEST_IO_LOGGER.isTraceEnabled()) {
+                            UndertowLogger.REQUEST_IO_LOGGER.tracef("Resuming reads on %s as buffers have been consumed", AbstractFramedChannel.this);
+                        }
                         channel.getSourceChannel().resumeReads();
                     }
                 }
@@ -160,7 +163,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
             try {
                 AbstractFramedStreamSourceChannel stream = channel.receive();
                 if(stream != null) {
-                    WebSocketLogger.REQUEST_LOGGER.debugf("Draining channel %s as no receive listener has been set", stream);
+                    UndertowLogger.REQUEST_IO_LOGGER.debugf("Draining channel %s as no receive listener has been set", stream);
                     stream.getReadSetter().set(ChannelListeners.drainListener(Long.MAX_VALUE, null, null));
                     stream.wakeupReads();
                 }
@@ -173,7 +176,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     /**
      * Create a new {@link io.undertow.server.protocol.framed.AbstractFramedChannel}
      * 8
-     *  @param connectedStreamChannel The {@link org.xnio.channels.ConnectedStreamChannel} over which the WebSocket Frames should get send and received.
+     *  @param connectedStreamChannel The {@link org.xnio.channels.ConnectedStreamChannel} over which the Frames should get send and received.
      *                               Be aware that it already must be "upgraded".
      * @param bufferPool             The {@link ByteBufferPool} which will be used to acquire {@link ByteBuffer}'s from.
      * @param framePriority
@@ -216,7 +219,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     }
 
     protected IdleTimeoutConduit createIdleTimeoutChannel(StreamConnection connectedStreamChannel) {
-        return new IdleTimeoutConduit(connectedStreamChannel.getSinkChannel().getConduit(), connectedStreamChannel.getSourceChannel().getConduit());
+        return new IdleTimeoutConduit(connectedStreamChannel);
     }
 
     void runInIoThread(Runnable task) {
@@ -373,7 +376,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                     readChannelDone = true;
                     lastDataRead();
                     return null;
-                } else if(isLastFrameReceived()) {
+                } else if(isLastFrameReceived() && frameDataRemaining == 0) {
                     //we got data, although we should have received the last frame
                     forceFree = true;
                     markReadsBroken(new ClosedChannelException());
@@ -384,12 +387,17 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                 if (frameDataRemaining >= pooled.getBuffer().remaining()) {
                     frameDataRemaining -= pooled.getBuffer().remaining();
                     if(receiver != null) {
-                        receiver.dataReady(null, pooled);
+                        //we still create a pooled view, this means that if the buffer is still active we can re-used it
+                        //which prevents attacks based on sending lots of small fragments
+                        ByteBuffer buf = pooled.getBuffer().duplicate();
+                        pooled.getBuffer().position(pooled.getBuffer().limit());
+                        PooledByteBuffer frameData = pooled.createView(buf);
+                        receiver.dataReady(null, frameData);
                     } else {
                         //we are dropping a frame
                         pooled.close();
+                        readData = null;
                     }
-                    readData = null;
                     if(frameDataRemaining == 0) {
                         receiver = null;
                     }
@@ -436,6 +444,9 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                         receiver = (R) existing;
                     }
                     existing.dataReady(data, frameData);
+                    if(isLastFrameReceived()) {
+                        handleLastFrame(existing);
+                    }
                     return null;
                 } else {
                     boolean moreData = data.getFrameLength() > frameData.getBuffer().remaining();
@@ -447,10 +458,13 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                         if (moreData) {
                             receiver = newChannel;
                         }
+
+                        if(isLastFrameReceived()) {
+                            handleLastFrame(newChannel);
+                        }
                     } else {
                         frameData.close();
                     }
-
                     return newChannel;
                 }
             }
@@ -479,6 +493,20 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
         }
     }
 
+    /**
+     * Called when the last frame has been received (note that their may still be data from the last frame than needs to be read)
+     * @param newChannel The channel that received the last frame
+     */
+    private void handleLastFrame(AbstractFramedStreamSourceChannel newChannel) {
+        //make a defensive copy
+        Set<AbstractFramedStreamSourceChannel<C, R, S>> receivers = new HashSet<>(this.receivers);
+        for(AbstractFramedStreamSourceChannel<C, R, S> r : receivers) {
+            if(r != newChannel) {
+                r.markStreamBroken();
+            }
+        }
+    }
+
     private ReferenceCountedPooled allocateReferenceCountedBuffer() {
         if(maxQueuedBuffers > 0) {
             int expect;
@@ -489,6 +517,9 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                         //we need to re-read in a sync block, to prevent races
                         expect = outstandingBuffersUpdater.get(this);
                         if (expect == maxQueuedBuffers) {
+                            if(UndertowLogger.REQUEST_IO_LOGGER.isTraceEnabled()) {
+                                UndertowLogger.REQUEST_IO_LOGGER.tracef("Suspending reads on %s due to too many outstanding buffers", this);
+                            }
                             channel.getSourceChannel().suspendReads();
                             return null;
                         }
@@ -548,6 +579,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
             int toSend = 0;
             while (!newFrames.isEmpty()) {
                 S frame = newFrames.poll();
+                frame.preWrite();
                 if (framePriority.insertFrame(frame, pendingFrames)) {
                     if (!heldFrames.isEmpty()) {
                         framePriority.frameAdded(frame, pendingFrames, heldFrames);
@@ -591,11 +623,12 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                     //todo: rather than adding empty buffers just store the offsets
                     SendFrameHeader frameHeader = next.getFrameHeader();
                     PooledByteBuffer frameHeaderByteBuffer = frameHeader.getByteBuffer();
+                    ByteBuffer frameTrailerBuffer = frameHeader.getTrailer();
                     data[j * 3] = frameHeaderByteBuffer != null
                             ? frameHeaderByteBuffer.getBuffer()
                             : Buffers.EMPTY_BYTE_BUFFER;
                     data[(j * 3) + 1] = next.getBuffer() == null ? Buffers.EMPTY_BYTE_BUFFER : next.getBuffer();
-                    data[(j * 3) + 2] = next.getFrameFooter();
+                    data[(j * 3) + 2] = frameTrailerBuffer != null ? frameTrailerBuffer : Buffers.EMPTY_BYTE_BUFFER;
                     ++j;
                 }
                 long toWrite = Buffers.remaining(data);
@@ -609,9 +642,10 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                 while (max > 0) {
                     S sinkChannel = pendingFrames.get(0);
                     PooledByteBuffer frameHeaderByteBuffer = sinkChannel.getFrameHeader().getByteBuffer();
+                    ByteBuffer frameTrailerBuffer = sinkChannel.getFrameHeader().getTrailer();
                     if (frameHeaderByteBuffer != null && frameHeaderByteBuffer.getBuffer().hasRemaining()
                             || sinkChannel.getBuffer() != null && sinkChannel.getBuffer().hasRemaining()
-                            || sinkChannel.getFrameFooter().hasRemaining()) {
+                            || frameTrailerBuffer != null && frameTrailerBuffer.hasRemaining()) {
                         break;
                     }
                     sinkChannel.flushComplete();
@@ -776,10 +810,15 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     @SuppressWarnings({"unchecked", "rawtypes"})
     protected void markReadsBroken(Throwable cause) {
         if (readsBrokenUpdater.compareAndSet(this, 0, 1)) {
+            if(receiver != null) {
+                receiver.markStreamBroken();
+            }
+            for(AbstractFramedStreamSourceChannel<C, R, S> r : receivers) {
+                r.markStreamBroken();
+            }
+
             handleBrokenSourceChannel(cause);
             safeClose(channel.getSourceChannel());
-
-
             closeSubChannels();
         }
     }
@@ -849,11 +888,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
     }
 
     void notifyFrameReadComplete(AbstractFramedStreamSourceChannel<C, R, S> channel) {
-        synchronized (AbstractFramedChannel.this) {
-            if (isLastFrameReceived()) {
-                safeClose(AbstractFramedChannel.this.channel.getSourceChannel());
-            }
-        }
+
     }
 
     void notifyClosed(AbstractFramedStreamSourceChannel<C, R, S> channel) {
@@ -884,7 +919,7 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                 if(listener == null) {
                     listener = DRAIN_LISTENER;
                 }
-                WebSocketLogger.REQUEST_LOGGER.tracef("Invoking receive listener", receiver);
+                UndertowLogger.REQUEST_IO_LOGGER.tracef("Invoking receive listener", receiver);
                 ChannelListeners.invokeChannelListener(AbstractFramedChannel.this, listener);
             }
             if (readData != null  && !readData.isFreed() && channel.isOpen()) {
@@ -919,6 +954,18 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
 
         @Override
         public void handleEvent(final CloseableChannel c) {
+
+            if (Thread.currentThread() != c.getIoThread() && !c.getWorker().isShutdown()) {
+                runInIoThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        ChannelListeners.invokeChannelListener(c, FrameCloseListener.this);
+                    }
+                });
+                return;
+            }
+
+
             if(c instanceof  StreamSinkChannel) {
                 sinkClosed = true;
             } else if(c instanceof StreamSourceChannel) {
@@ -949,16 +996,6 @@ public abstract class AbstractFramedChannel<C extends AbstractFramedChannel<C, R
                     }
                 });
 
-                return;
-            }
-
-            if (Thread.currentThread() != c.getIoThread()) {
-                runInIoThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        ChannelListeners.invokeChannelListener(c, FrameCloseListener.this);
-                    }
-                });
                 return;
             }
             R receiver = AbstractFramedChannel.this.receiver;

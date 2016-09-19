@@ -25,11 +25,13 @@ import java.nio.channels.ClosedChannelException;
 import io.undertow.predicate.PredicateBuilder;
 import io.undertow.protocols.http2.HpackException;
 import io.undertow.server.handlers.builder.HandlerBuilder;
+import io.undertow.util.HttpString;
 import org.jboss.logging.Messages;
 import org.jboss.logging.annotations.Cause;
 import org.jboss.logging.annotations.Message;
 import org.jboss.logging.annotations.MessageBundle;
 
+import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLPeerUnverifiedException;
 
 /**
@@ -64,8 +66,8 @@ public interface UndertowMessages {
     @Message(id = 9, value = "Path must be specified")
     IllegalArgumentException pathMustBeSpecified();
 
-    @Message(id = 10, value = "Session not found %s")
-    IllegalStateException sessionNotFound(final String session);
+    @Message(id = 10, value = "Session is invalid %s")
+    IllegalStateException sessionIsInvalid(String sessionId);
 
     @Message(id = 11, value = "Session manager must not be null")
     IllegalStateException sessionManagerMustNotBeNull();
@@ -293,11 +295,11 @@ public interface UndertowMessages {
     @Message(id = 88, value = "SPDY control frames cannot have body content")
     IOException controlFrameCannotHaveBodyContent();
 
-    @Message(id = 89, value = "SPDY not supported")
-    IOException spdyNotSupported();
+//    @Message(id = 89, value = "SPDY not supported")
+//    IOException spdyNotSupported();
 
-    @Message(id = 90, value = "Jetty NPN not available")
-    IOException jettyNPNNotAvailable();
+    @Message(id = 90, value = "No ALPN implementation available (tried Jetty ALPN and JDK9)")
+    IOException alpnNotAvailable();
 
     @Message(id = 91, value = "Buffer has already been freed")
     IllegalStateException bufferAlreadyFreed();
@@ -305,8 +307,8 @@ public interface UndertowMessages {
     @Message(id = 92, value = "A SPDY header was too large to fit in a response buffer, if you want to support larger headers please increase the buffer size")
     IllegalStateException headersTooLargeToFitInHeapBuffer();
 
-    @Message(id = 93, value = "A SPDY stream was reset by the remote endpoint")
-    IOException spdyStreamWasReset();
+//    @Message(id = 93, value = "A SPDY stream was reset by the remote endpoint")
+//    IOException spdyStreamWasReset();
 
     @Message(id = 94, value = "Blocking await method called from IO thread. Blocking IO must be dispatched to a worker thread or deadlocks will result.")
     IOException awaitCalledFromIoThread();
@@ -443,4 +445,49 @@ public interface UndertowMessages {
 
     @Message(id = 138, value = "Server not started")
     IllegalStateException serverNotStarted();
+
+    @Message(id = 139, value = "Exchange already complete")
+    IllegalStateException exchangeAlreadyComplete();
+
+    @Message(id = 140, value = "Initial SSL/TLS data is not a handshake record")
+    SSLHandshakeException notHandshakeRecord();
+
+    @Message(id = 141, value = "Initial SSL/TLS handshake record is invalid")
+    SSLHandshakeException invalidHandshakeRecord();
+
+    @Message(id = 142, value = "Initial SSL/TLS handshake spans multiple records")
+    SSLHandshakeException multiRecordSSLHandshake();
+
+    @Message(id = 143, value = "Expected \"client hello\" record")
+    SSLHandshakeException expectedClientHello();
+
+    @Message(id = 144, value = "Expected server hello")
+    SSLHandshakeException expectedServerHello();
+
+    @Message(id = 145, value = "Too many redirects")
+    IOException tooManyRedirects(@Cause IOException exception);
+
+    @Message(id = 146, value = "HttpServerExchange cannot have both async IO resumed and dispatch() called in the same cycle")
+    IllegalStateException resumedAndDispatched();
+
+    @Message(id = 147, value = "No host header in a HTTP/1.1 request")
+    IOException noHostInHttp11Request();
+
+    @Message(id = 148, value = "Invalid HPack encoding. First byte: %s")
+    HpackException invalidHpackEncoding(byte b);
+
+    @Message(id = 149, value = "HttpString is not allowed to contain newlines. value: %s")
+    IllegalArgumentException newlineNotSupportedInHttpString(String value);
+
+    @Message(id = 150, value = "Pseudo header %s received after receiving normal headers. Pseudo headers must be the first headers in a HTTP/2 header block.")
+    HpackException pseudoHeaderInWrongOrder(HttpString header);
+
+    @Message(id = 151, value = "Expected to receive a continuation frame")
+    String expectedContinuationFrame();
+
+    @Message(id = 152, value = "Incorrect frame size")
+    String incorrectFrameSize();
+
+    @Message(id = 153, value = "Stream id not registered")
+    IllegalStateException streamNotRegistered();
 }

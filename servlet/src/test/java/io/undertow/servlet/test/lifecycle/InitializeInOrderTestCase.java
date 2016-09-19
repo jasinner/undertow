@@ -35,12 +35,15 @@ public class InitializeInOrderTestCase {
         DeploymentUtils.setupServlet(new ServletInfo("s1", FirstServlet.class)
                 .setLoadOnStartup(1),
                 new ServletInfo("s2", SecondServlet.class)
-                        .setLoadOnStartup(2));
+                        .setLoadOnStartup(2)
+                ,new ServletInfo("s3", ThirdServlet.class)
+                .setLoadOnStartup(3));
     }
 
     @Test
     public void testInitializeInOrder() throws Exception {
         Assert.assertTrue(FirstServlet.init);
         Assert.assertTrue(SecondServlet.init);
+        Assert.assertTrue(ThirdServlet.init);
     }
 }

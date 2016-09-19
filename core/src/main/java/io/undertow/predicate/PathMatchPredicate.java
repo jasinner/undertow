@@ -32,7 +32,7 @@ class PathMatchPredicate implements Predicate {
 
     private final PathMatcher<Boolean> pathMatcher;
 
-    public PathMatchPredicate(final String... paths) {
+    PathMatchPredicate(final String... paths) {
         PathMatcher<Boolean> matcher = new PathMatcher<>();
         for(String path : paths) {
             if(!path.startsWith("/")) {
@@ -48,7 +48,7 @@ class PathMatchPredicate implements Predicate {
     public boolean resolve(final HttpServerExchange value) {
         final String relativePath = value.getRelativePath();
         PathMatcher.PathMatch<Boolean> result = pathMatcher.match(relativePath);
-        return result.getValue() == Boolean.TRUE;
+        return Boolean.TRUE.equals(result.getValue());
     }
 
     public static class Builder implements PredicateBuilder {

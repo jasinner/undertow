@@ -25,6 +25,8 @@ import java.util.TreeSet;
  */
 public class PathResourceManager implements ResourceManager  {
 
+    private static final boolean DEFAULT_CHANGE_LISTENERS_ALLOWED = !Boolean.getBoolean("io.undertow.disable-file-system-watcher");
+
     private final List<ResourceChangeListener> listeners = new ArrayList<>();
 
     private FileSystemWatcher fileSystemWatcher;
@@ -38,7 +40,7 @@ public class PathResourceManager implements ResourceManager  {
 
     /**
      * Check to validate caseSensitive issues for specific case-insensitive FS.
-     * @see io.undertow.server.handlers.resource.PathResourceManager#isFileSameCase(java.nio.file.Path)
+     * @see io.undertow.server.handlers.resource.PathResourceManager#isFileSameCase(java.nio.file.Path, String)
      */
     private final boolean caseSensitive;
 
@@ -53,6 +55,8 @@ public class PathResourceManager implements ResourceManager  {
      */
     private final TreeSet<String> safePaths = new TreeSet<>();
 
+    private final boolean allowResourceChangeListeners;
+
     public PathResourceManager(final Path base, long transferMinSize) {
         this(base, transferMinSize, true, false, null);
     }
@@ -66,9 +70,14 @@ public class PathResourceManager implements ResourceManager  {
     }
 
     protected PathResourceManager(long transferMinSize, boolean caseSensitive, boolean followLinks, final String... safePaths) {
+        this(transferMinSize, caseSensitive, followLinks, DEFAULT_CHANGE_LISTENERS_ALLOWED, safePaths);
+    }
+
+    protected PathResourceManager(long transferMinSize, boolean caseSensitive, boolean followLinks, boolean allowResourceChangeListeners, final String... safePaths) {
         this.caseSensitive = caseSensitive;
         this.followLinks = followLinks;
         this.transferMinSize = transferMinSize;
+        this.allowResourceChangeListeners = allowResourceChangeListeners;
         if (this.followLinks) {
             if (safePaths == null) {
                 throw UndertowMessages.MESSAGES.argumentCannotBeNull("safePaths");
@@ -83,12 +92,17 @@ public class PathResourceManager implements ResourceManager  {
     }
 
     public PathResourceManager(final Path base, long transferMinSize, boolean caseSensitive, boolean followLinks, final String... safePaths) {
+        this(base, transferMinSize, caseSensitive, followLinks, DEFAULT_CHANGE_LISTENERS_ALLOWED, safePaths);
+    }
+
+    public PathResourceManager(final Path base, long transferMinSize, boolean caseSensitive, boolean followLinks, boolean allowResourceChangeListeners, final String... safePaths) {
+        this.allowResourceChangeListeners = allowResourceChangeListeners;
         if (base == null) {
             throw UndertowMessages.MESSAGES.argumentCannotBeNull("base");
         }
-        String basePath = base.toAbsolutePath().toString();
-        if (!basePath.endsWith("/")) {
-            basePath = basePath + '/';
+        String basePath = base.normalize().toAbsolutePath().toString();
+        if (!basePath.endsWith(File.separator)) {
+            basePath = basePath + File.separatorChar;
         }
         this.base = basePath;
         this.transferMinSize = transferMinSize;
@@ -116,8 +130,8 @@ public class PathResourceManager implements ResourceManager  {
             throw UndertowMessages.MESSAGES.argumentCannotBeNull("base");
         }
         String basePath = base.toAbsolutePath().toString();
-        if (!basePath.endsWith("/")) {
-            basePath = basePath + '/';
+        if (!basePath.endsWith(File.separator)) {
+            basePath = basePath + File.separatorChar;
         }
         this.base = basePath;
         return this;
@@ -128,8 +142,8 @@ public class PathResourceManager implements ResourceManager  {
             throw UndertowMessages.MESSAGES.argumentCannotBeNull("base");
         }
         String basePath = base.getAbsolutePath();
-        if (!basePath.endsWith("/")) {
-            basePath = basePath + '/';
+        if (!basePath.endsWith(File.separator)) {
+            basePath = basePath + File.separatorChar;
         }
         this.base = basePath;
         return this;
@@ -145,8 +159,19 @@ public class PathResourceManager implements ResourceManager  {
         }
         try {
             Path file = Paths.get(base, path);
+            String normalizedFile = file.normalize().toString();
+            if(!normalizedFile.startsWith(base)) {
+                if(normalizedFile.length() == base.length() - 1) {
+                    //special case for the root path, which may not have a trailing slash
+                    if(!base.startsWith(normalizedFile)) {
+                        return null;
+                    }
+                } else {
+                    return null;
+                }
+            }
             if (Files.exists(file)) {
-                if(path.endsWith("/") && ! Files.isDirectory(file)) {
+                if(path.endsWith(File.separator) && ! Files.isDirectory(file)) {
                     //UNDERTOW-432 don't return non directories if the path ends with a /
                     return null;
                 }
@@ -154,10 +179,10 @@ public class PathResourceManager implements ResourceManager  {
                 SymlinkResult symlinkBase = getSymlinkBase(base, file);
                 if (!followAll && symlinkBase != null && symlinkBase.requiresCheck) {
                     if (this.followLinks && isSymlinkSafe(file)) {
-                        return getFileResource(file, path, symlinkBase.path);
+                        return getFileResource(file, path, symlinkBase.path, normalizedFile);
                     }
                 } else {
-                    return getFileResource(file, path, symlinkBase == null ? null : symlinkBase.path);
+                    return getFileResource(file, path, symlinkBase == null ? null : symlinkBase.path, normalizedFile);
                 }
             }
             return null;
@@ -169,11 +194,16 @@ public class PathResourceManager implements ResourceManager  {
 
     @Override
     public boolean isResourceChangeListenerSupported() {
-        return true;
+        return allowResourceChangeListeners;
     }
 
     @Override
     public synchronized void registerResourceChangeListener(ResourceChangeListener listener) {
+        if(!allowResourceChangeListeners) {
+            //by rights we should throw an exception here, but this works around a bug in Wildfly where it just assumes
+            //PathResourceManager supports this. This will be fixed in a later version
+            return;
+        }
         listeners.add(listener);
         if (fileSystemWatcher == null) {
             fileSystemWatcher = Xnio.getInstance().createFileSystemWatcher("Watcher for " + base, OptionMap.EMPTY);
@@ -200,6 +230,9 @@ public class PathResourceManager implements ResourceManager  {
 
     @Override
     public synchronized void removeResourceChangeListener(ResourceChangeListener listener) {
+        if(!allowResourceChangeListeners) {
+            return;
+        }
         listeners.remove(listener);
     }
 
@@ -242,9 +275,9 @@ public class PathResourceManager implements ResourceManager  {
      * file.getName() == "page.jsp" && file.getCanonicalFile().getName() == "page.JSP" should return false
      * file.getName() == "./page.jsp" && file.getCanonicalFile().getName() == "page.jsp" should return true
      */
-    private boolean isFileSameCase(final Path file) throws IOException {
+    private boolean isFileSameCase(final Path file, String normalizeFile) throws IOException {
         String canonicalName = file.toRealPath().toString();
-        return canonicalName.equals(file.normalize().toString());
+        return canonicalName.equals(normalizeFile);
     }
 
     /**
@@ -255,7 +288,7 @@ public class PathResourceManager implements ResourceManager  {
         String canonicalPath = file.toRealPath().toString();
         for (String safePath : this.safePaths) {
             if (safePath.length() > 0) {
-                if (safePath.charAt(0) == '/') {
+                if (safePath.charAt(0) == File.separatorChar) {
                     /*
                      * Absolute path
                      */
@@ -268,7 +301,7 @@ public class PathResourceManager implements ResourceManager  {
                     /*
                      * In relative path we build the path appending to base
                      */
-                    String absSafePath = base + '/' + safePath;
+                    String absSafePath = base + File.separatorChar + safePath;
                     Path absSafePathFile = Paths.get(absSafePath);
                     String canonicalSafePath = absSafePathFile.toRealPath().toString();
                     if (canonicalSafePath.length() > 0 &&
@@ -286,7 +319,7 @@ public class PathResourceManager implements ResourceManager  {
     /**
      * Apply security check for case insensitive file systems.
      */
-    protected PathResource getFileResource(final Path file, final String path, final Path symlinkBase) throws IOException {
+    protected PathResource getFileResource(final Path file, final String path, final Path symlinkBase, String normalizedFile) throws IOException {
         if (this.caseSensitive) {
             if (symlinkBase != null) {
                 String relative = symlinkBase.relativize(file).toString();
@@ -296,10 +329,10 @@ public class PathResourceManager implements ResourceManager  {
                     return null;
                 }
                 String compare = fileResolved.substring(symlinkBaseResolved.length());
-                if(compare.startsWith("/")) {
+                if(compare.startsWith(File.separator)) {
                     compare = compare.substring(1);
                 }
-                if(relative.startsWith("/")) {
+                if(relative.startsWith(File.separator)) {
                     relative = relative.substring(1);
                 }
                 if (relative.equals(compare)) {
@@ -307,7 +340,7 @@ public class PathResourceManager implements ResourceManager  {
                 }
 
                 return null;
-            } else if (isFileSameCase(file)) {
+            } else if (isFileSameCase(file, normalizedFile)) {
                 return new PathResource(file, this, path);
             } else {
                 return null;
